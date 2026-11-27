@@ -1993,7 +1993,7 @@ and `p95` must be numbers that fit in a float.
 
 ### `baseline`
 ```
-agent-strace baseline update [--since DAYS] [--output FILE]
+agent-strace baseline update [--since Nd] [--output FILE]
 agent-strace baseline check [session-id] [--baseline FILE] [--sigma N]
 agent-strace baseline show [--baseline FILE]
 ```
@@ -2004,12 +2004,19 @@ session with that profile. The default profile path is
 | Command or flag | Default | Description |
 |---|---|---|
 | `update` | — | Build a profile from completed sessions in the selected time window |
-| `update --since DAYS` | `30` | Include sessions started within the last number of days |
+| `update --since Nd` | `30d` | Include sessions started within the last N days |
 | `update --output FILE` | `.agent-traces/baseline.json` | Write the profile to a custom path |
 | `check [session-id]` | latest | Check a session ID or prefix against the profile |
 | `check --baseline FILE` | `.agent-traces/baseline.json` | Read a custom profile |
 | `check --sigma N` | `2.0` | Flag metrics more than N standard deviations from the mean |
 | `show --baseline FILE` | `.agent-traces/baseline.json` | Display profile statistics from a custom path |
+
+`update --since` is the last N days, as `N` or `Nd`, such as `7`, `7d` or
+`0.5d`. N is ASCII digits with at most one `.` between digits. `0d` selects
+nothing. Any other value, an empty one too, prints
+`invalid --since value: use a number of days as N or Nd, such as 7d` on stderr
+and exits 1. That check runs before the store is read, so `update` writes no
+profile and leaves the one at `--output` as it was.
 
 The profile tracks cost, tool calls, duration, error rate, and LLM requests.
 The error rate counts [failed model requests](production.md#session-error-counts) as errors; rebuild profiles saved by earlier

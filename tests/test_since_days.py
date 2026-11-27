@@ -1,4 +1,5 @@
-"""compliance export, dashboard --trend, drift and eval dataset auto read --since.
+"""baseline update, compliance export, dashboard --trend, drift and eval dataset
+auto read --since.
 
 Each reads it as N or Nd days, as export --scores does. Any other value exits 1
 with one line on stderr, before the command reads the store or a baseline, or
@@ -33,22 +34,31 @@ AGES = {ONE: 1, TEN: 10, FORTY: 40}
 
 REFUSAL = "invalid --since value: use a number of days as N or Nd, such as 7d\n"
 REFUSED = ["", "abc", "7d ", "7dd", "1e2d", "\u0661\u0660", "nan", "-5d", "1" + "0" * 400]
+# Values that baseline update read as a float before. Each is refused now.
+FLOAT_READ = ["inf", "-inf", "Infinity", "NaN", "-5", "-0", "+5", "1e2", "5.", ".5",
+              " 7", "7 ", "1_0", "\uff17", "1e400"]
 
 # The sessions each command selects for a value it reads.
 READ = {
-    "7d": {"compliance": {ONE}, "trend": 1, "drift": (1, 0), "dataset": (1, {ONE})},
-    "7": {"compliance": {ONE}, "trend": 1, "drift": (1, 0), "dataset": (1, {ONE})},
-    "0.5d": {"compliance": set(), "trend": 0, "drift": (0, 0), "dataset": (0, set())},
-    "30d": {"compliance": {ONE, TEN}, "trend": 2, "drift": (1, 1), "dataset": (2, {ONE, TEN})},
-    "0d": {"compliance": set(), "trend": 0, "drift": (0, 0), "dataset": (0, set())},
+    "7d": {"compliance": {ONE}, "trend": 1, "drift": (1, 0), "dataset": (1, {ONE}),
+           "baseline": 1},
+    "7": {"compliance": {ONE}, "trend": 1, "drift": (1, 0), "dataset": (1, {ONE}),
+          "baseline": 1},
+    "0.5d": {"compliance": set(), "trend": 0, "drift": (0, 0), "dataset": (0, set()),
+             "baseline": 0},
+    "30d": {"compliance": {ONE, TEN}, "trend": 2, "drift": (1, 1), "dataset": (2, {ONE, TEN}),
+            "baseline": 2},
+    "0d": {"compliance": set(), "trend": 0, "drift": (0, 0), "dataset": (0, set()),
+           "baseline": 0},
 }
 
-# Each command's output file. drift and dataset make its parent directory.
+# Each command's output file. drift, dataset and baseline make its parent directory.
 OUTPUT = {
     "compliance": ("-o", "compliance.json"),
     "trend": ("--html", "trend.html"),
     "drift": ("--save-baseline", "sub/fingerprint.json"),
     "dataset": ("--dataset", "sub/d.jsonl"),
+    "baseline": ("--output", "sub/baseline.json"),
 }
 
 SPECIFY = "Specify --since Nd or --current YYYY-MM-DD:YYYY-MM-DD\n"
@@ -84,6 +94,8 @@ def command_argv(command: str, value: str, out: Path | None = None) -> list[str]
         argv = ["dashboard", "--trend", since]
     elif command == "drift":
         argv = ["drift", since, "--format", "json"]
+    elif command == "baseline":
+        argv = ["baseline", "update", since]
     else:
         argv = ["eval", "dataset", "auto", since, "--filter", "long-duration:30s"]
     if out is not None:
@@ -123,6 +135,15 @@ def dataset_added(run: subprocess.CompletedProcess, path: Path) -> tuple:
     return (int(match.group(1)) if match else None), ids
 
 
+def baseline_count(run: subprocess.CompletedProcess, path: Path) -> tuple:
+    """Return the session count that update printed, and the one it saved."""
+    match = re.match(r"Baseline updated: (\d+) sessions", run.stdout)
+    saved = None
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))["session_count"]
+    return (int(match.group(1)) if match else None), saved
+
+
 def label(value: str) -> str:
     return value if len(value) < 20 else f"1 and {len(value) - 1} zeros"
 
@@ -139,9 +160,9 @@ class _SinceCase(_CliCase):
 class TestRefusedValues(_SinceCase):
     """Each refused value exits 1 with one line and writes no file."""
 
-    def check_refused(self, command: str) -> None:
+    def check_refused(self, command: str, values: list[str] = REFUSED) -> None:
         cases = []
-        for n, value in enumerate(REFUSED):
+        for n, value in enumerate(values):
             case_dir = self.root / "out" / command / str(n)
             case_dir.mkdir(parents=True)
             cases.append((value, case_dir, case_dir / OUTPUT[command][1]))
@@ -150,6 +171,22 @@ class TestRefusedValues(_SinceCase):
             with self.subTest(value=label(value)):
                 self.assertRefused(run)
                 self.assertEqual(list(case_dir.iterdir()), [])
+
+    def test_baseline_update(self):
+        self.check_refused("baseline")
+
+    def test_baseline_update_refuses_what_it_read_as_a_float(self):
+        self.check_refused("baseline", FLOAT_READ)
+
+    def test_baseline_update_keeps_the_saved_profile(self):
+        saved = self.root / "cwd" / ".agent-traces" / "baseline.json"
+        saved.parent.mkdir()
+        saved.write_text("saved\n", encoding="utf-8")
+        # nan and -5 selected no session before, and inf every session.
+        for value in ("nan", "-5", "inf"):
+            with self.subTest(value=value):
+                self.assertRefused(self.cli("baseline", "update", f"--since={value}"))
+                self.assertEqual(saved.read_text(encoding="utf-8"), "saved\n")
 
     def test_compliance_export(self):
         self.check_refused("compliance")
@@ -166,6 +203,15 @@ class TestRefusedValues(_SinceCase):
 
 class TestReadValues(_SinceCase):
     """N and Nd are days, and 0d is a window of no days."""
+
+    def test_baseline_update(self):
+        paths = {value: self.root / "out" / str(n) / "b.json" for n, value in enumerate(READ)}
+        runs = self.cli_many([command_argv("baseline", value, paths[value]) for value in READ])
+        for value, run in zip(READ, runs):
+            with self.subTest(value=value):
+                self.assertEqual((run.returncode, run.stderr), (0, ""))
+                count = READ[value]["baseline"]
+                self.assertEqual(baseline_count(run, paths[value]), (count, count))
 
     def test_compliance_export(self):
         runs = self.cli_many([command_argv("compliance", value) for value in READ])
@@ -216,6 +262,20 @@ class TestCheckOrder(_SinceCase):
         baseline.write_text("{", encoding="utf-8")
         self.assertRefused(self.cli("drift", "--since=abc", "--baseline", str(baseline)))
 
+    def test_baseline_update_refuses_before_it_opens_the_store(self):
+        bare = self.root / "bare"
+        bare.mkdir()
+        out = self.root / "out" / "b.json"
+        argv = ["baseline", "update", "--output", str(out)]
+        self.assertRefused(self.cli(*argv, "--since=abc", trace_dir=bare))
+        self.assertEqual(list(bare.iterdir()), [])
+        self.assertFalse(out.exists())
+        # Opening the store writes its .gitignore, so the empty directory
+        # above shows that the refusal came first.
+        run = self.cli(*argv, "--since=7d", trace_dir=bare)
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        self.assertEqual([path.name for path in bare.iterdir()], [".gitignore"])
+
 
 class TestComplianceExportSessionId(_SinceCase):
     """With a session ID, --since still takes the window of sessions."""
@@ -238,6 +298,12 @@ class TestComplianceExportSessionId(_SinceCase):
 
 class TestUnchangedPaths(_SinceCase):
     """No --since, drift --current and plain dashboard work as before."""
+
+    def test_baseline_update_takes_30_days(self):
+        path = self.root / "out" / "b.json"
+        run = self.cli("baseline", "update", "--output", str(path))
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        self.assertEqual(baseline_count(run, path), (2, 2))
 
     def test_compliance_export_takes_30_days(self):
         run = self.cli("compliance", "export")

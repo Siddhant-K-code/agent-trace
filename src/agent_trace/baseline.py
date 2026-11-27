@@ -29,7 +29,15 @@ from .cost import estimate_cost
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES
 from .failures import count_session_errors
-from .models import EventType, TraceEvent, usable_count, usable_number, usable_time
+from .models import (
+    SINCE_DAYS_FORM,
+    EventType,
+    TraceEvent,
+    parse_since_days,
+    usable_count,
+    usable_number,
+    usable_time,
+)
 from .store import TraceStore
 
 
@@ -391,11 +399,15 @@ def load_baseline(path: str = DEFAULT_BASELINE_PATH) -> BaselineProfile | None:
 # ---------------------------------------------------------------------------
 
 def cmd_baseline(args: argparse.Namespace) -> int:
-    store = TraceStore(args.trace_dir)
     sub = getattr(args, "baseline_cmd", None)
 
     if sub == "update":
-        since_days = float(getattr(args, "since_days", 30))
+        # Checked before the store is opened, so a refused value writes nothing.
+        since_days = parse_since_days(getattr(args, "since_days", "30d"))
+        if since_days is None:
+            sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+            return 1
+        store = TraceStore(args.trace_dir)
         output = getattr(args, "output", DEFAULT_BASELINE_PATH)
         profile = build_baseline(store, since_days=since_days)
         save_baseline(profile, output)
@@ -405,7 +417,8 @@ def cmd_baseline(args: argparse.Namespace) -> int:
         )
         return 0
 
-    elif sub == "check":
+    store = TraceStore(args.trace_dir)
+    if sub == "check":
         session_id = getattr(args, "session_id", None)
         if not session_id:
             session_id = store.get_latest_session_id()
