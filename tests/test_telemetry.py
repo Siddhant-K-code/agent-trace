@@ -345,6 +345,22 @@ class TestAnalyticsSession(TelemetryTestCase):
         for body in (first, second):
             self.assertLessEqual(start, datetime.fromisoformat(body["timestamp"]))
 
+    def test_uuid7_clamps_times_outside_its_range(self):
+        for unix_ms, start in ((-1, 0), (-86_400_000, 0), (1 << 48, (1 << 48) - 1)):
+            with self.subTest(unix_ms=unix_ms):
+                session_id = telemetry._uuid7(unix_ms)
+                self.assertEqual(uuid.UUID(session_id).version, 7)
+                self.assertEqual(telemetry._session_start_ms(session_id), start)
+
+    def test_pre_epoch_clock_never_starts_a_session_after_its_event(self):
+        self._capture()
+        with patch.object(telemetry.time, "time", return_value=-86_400.5):
+            body = self._capture()
+        start = telemetry._session_start_ms(body["properties"]["$session_id"])
+        self.assertEqual(start, 0)
+        event_ms = datetime.fromisoformat(body["timestamp"]).timestamp() * 1000
+        self.assertLessEqual(start, event_ms)
+
     def test_session_rotates_after_idle_time_and_maximum_length(self):
         telemetry.set_telemetry_enabled(True)
         first = self._session_at(0)

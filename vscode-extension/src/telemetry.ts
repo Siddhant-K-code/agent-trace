@@ -15,6 +15,7 @@ import {
   nextAnalyticsSession,
   sanitiseEventProperties,
   uuidv7,
+  uuidv7Time,
 } from "./telemetryCore";
 import { SessionState } from "./traceStore";
 
@@ -288,7 +289,10 @@ export class ExtensionTelemetry implements vscode.Disposable {
       return;
     }
 
-    const now = Date.now();
+    // Clamped like the session's UUIDv7 start and used as the event's
+    // timestamp, so a clock outside that range never puts the start after
+    // the event.
+    const now = uuidv7Time(Date.now());
     this.analyticsSession = nextAnalyticsSession(
       this.analyticsSession,
       now,

@@ -6,6 +6,7 @@ import {
   SESSION_COMPLETED,
   SESSION_IDLE_MS,
   SESSION_MAX_MS,
+  UUIDV7_MAX_MS,
   nextAnalyticsSession,
   sanitiseEventProperties,
   uuidv7,
@@ -66,6 +67,14 @@ test("builds a UUIDv7 that starts at the given time", () => {
   assert.match(id, UUID7);
   assert.equal(parseInt(id.slice(0, 8) + id.slice(9, 13), 16), now);
   assert.match(uuidv7(now, new Uint8Array(10)), UUID7);
+});
+
+test("clamps UUIDv7 times outside the 48-bit range", () => {
+  const start = (id: string) => parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
+  const random = new Uint8Array(10);
+  assert.equal(start(uuidv7(-1, random)), 0);
+  assert.equal(start(uuidv7(2 ** 48, random)), UUIDV7_MAX_MS);
+  assert.match(uuidv7(2 ** 48, random), UUID7);
 });
 
 test("keeps a session until 30 idle minutes or 24 hours pass", () => {

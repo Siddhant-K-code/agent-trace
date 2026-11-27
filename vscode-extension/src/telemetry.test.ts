@@ -144,3 +144,18 @@ test("events from one window share a random UUIDv7 session", async () => {
   const startedAt = parseInt(sessionId.slice(0, 8) + sessionId.slice(9, 13), 16);
   assert.ok(startedAt <= Date.parse(sent[0].timestamp));
 });
+
+test("a pre-epoch clock never starts a session after its event", async () => {
+  const realNow = Date.now;
+  Date.now = () => -86_400_500;
+  try {
+    await captureOnce(true);
+  } finally {
+    Date.now = realNow;
+  }
+  const body = JSON.parse(fake.bodies[0]);
+  const sessionId: string = body.properties.$session_id;
+  const startedAt = parseInt(sessionId.slice(0, 8) + sessionId.slice(9, 13), 16);
+  assert.equal(startedAt, 0);
+  assert.ok(startedAt <= Date.parse(body.timestamp));
+});

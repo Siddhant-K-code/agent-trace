@@ -127,10 +127,20 @@ export interface AnalyticsSession {
   readonly lastEventAt: number;
 }
 
-/** Return a UUIDv7 (RFC 9562) for `unixMs` built from 10 random bytes. */
+export const UUIDV7_MAX_MS = 2 ** 48 - 1;
+
+/** Clamp `unixMs` to the 48-bit range a UUIDv7 timestamp can hold. */
+export function uuidv7Time(unixMs: number): number {
+  return Math.min(Math.max(0, Math.trunc(unixMs)), UUIDV7_MAX_MS);
+}
+
+/**
+ * Return a UUIDv7 (RFC 9562) for `unixMs` built from 10 random bytes.  A
+ * time outside the 48-bit range is clamped, not wrapped.
+ */
 export function uuidv7(unixMs: number, random: Uint8Array): string {
   const bytes = new Uint8Array(16);
-  let timestamp = Math.max(0, Math.trunc(unixMs));
+  let timestamp = uuidv7Time(unixMs);
   for (let index = 5; index >= 0; index -= 1) {
     bytes[index] = timestamp % 256;
     timestamp = Math.floor(timestamp / 256);

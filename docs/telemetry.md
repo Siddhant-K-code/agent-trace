@@ -140,8 +140,6 @@ that groups one stretch of use:
 
 ## Maintainer setup
 
-## Maintainer setup
-
 No database or deployed service is required. Use a managed PostHog project:
 
 1. Create a PostHog Cloud project and choose the US or EU region.

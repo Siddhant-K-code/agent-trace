@@ -81,6 +81,7 @@ _SESSION_IDLE_MS = 30 * 60 * 1000
 _SESSION_MAX_MS = 24 * 60 * 60 * 1000
 _SESSION_ID_KEY = "analytics_session_id"
 _SESSION_LAST_EVENT_KEY = "analytics_session_last_event_ms"
+_UUID7_MAX_MS = (1 << 48) - 1
 _UUID7 = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -293,9 +294,18 @@ def _anonymous_id() -> str:
     return value if _valid_anonymous_id(value) else ""
 
 
+def _uuid7_time(unix_ms: int) -> int:
+    """Clamp *unix_ms* to the 48-bit range a UUIDv7 timestamp can hold."""
+    return min(max(int(unix_ms), 0), _UUID7_MAX_MS)
+
+
 def _uuid7(unix_ms: int) -> str:
-    """Return a random UUIDv7 whose timestamp is *unix_ms* (RFC 9562)."""
-    value = (unix_ms & ((1 << 48) - 1)) << 80
+    """Return a random UUIDv7 whose timestamp is *unix_ms* (RFC 9562).
+
+    A time outside the 48-bit range is clamped, not wrapped, so a pre-epoch
+    clock never yields a far-future start.
+    """
+    value = _uuid7_time(unix_ms) << 80
     value |= 0x7 << 76
     value |= int.from_bytes(os.urandom(10), "big") & ((1 << 76) - 1)
     value &= ~(0x3 << 62)
@@ -333,7 +343,9 @@ def _analytics_session_id() -> tuple[str, int | None]:
         # not bring a session back.
         if not _valid_anonymous_id(current.get("anonymous_id")):
             return None
-        now_ms = int(time.time() * 1000)
+        # Clamped like the UUIDv7 start, and used as the event's timestamp,
+        # so a clock outside that range never puts the start after the event.
+        now_ms = _uuid7_time(time.time() * 1000)
         session_id = current.get(_SESSION_ID_KEY)
         last_ms = current.get(_SESSION_LAST_EVENT_KEY)
         start_ms = _session_start_ms(session_id)
