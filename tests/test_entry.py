@@ -343,6 +343,7 @@ _SECRET = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
 _MASKED_KEYS = {
     "timestamp", "started_at", "ended_at", "updated_at", "duration_ms", "total_duration_ms",
     "prev_hash", "pid", "ppid", "uuid", "$insert_id",
+    "$session_id", "analytics_session_id", "analytics_session_last_event_ms",
 }
 _EVENT_ID = re.compile(r"[0-9a-f]{12}")
 
@@ -647,6 +648,7 @@ class TestHookProcessEquivalence(unittest.TestCase):
         self.assertEqual(path, "/i/v0/e/")
         self.assertEqual(body["event"], telemetry.SESSION_COMPLETED)
         self.assertEqual(body["distinct_id"], "0" * 32)
+        self.assertEqual(body["properties"]["$session_id"], "<masked>")
 
     def test_errors_and_fallbacks(self):
         payload = {"session_id": "s", "cwd": "{work}", "tool_name": "Bash", "tool_input": {}}

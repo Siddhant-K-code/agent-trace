@@ -59,7 +59,7 @@ installation ID is created on the first event that is sent and stored in
 `~/.agent-strace/telemetry.json`
 (mode `0600`; updates are locked and atomic, see [Security](security.md#local-config-and-credential-files)).
 `agent-strace telemetry disable` persists the opt-out and deletes the
-identifier. `DO_NOT_TRACK=1` and `AGENT_STRACE_TELEMETRY=0` disable telemetry
+identifier and the current [analytics session](#analytics-sessions). `DO_NOT_TRACK=1` and `AGENT_STRACE_TELEMETRY=0` disable telemetry
 without changing the stored preference. CI is disabled by default;
 `AGENT_STRACE_TELEMETRY=1` is required to enable it there.
 
@@ -76,7 +76,7 @@ or until telemetry was explicitly enabled with the setting, the enable command,
 or `AGENT_STRACE_TELEMETRY=1`.
 
 The extension stores a separate random ID in VS Code global state and deletes
-it when disabled. CLI and extension preferences are separate; environment-level
+it, along with its in-memory analytics session, when disabled. CLI and extension preferences are separate; environment-level
 opt-outs apply to both when inherited by the editor extension host.
 
 ## Collected fields
@@ -89,9 +89,9 @@ The CLI emits three events:
 | `agent_strace_session_completed` | provider, capture method, success, duration when known |
 | `agent_strace_telemetry_enabled` | explicit enablement source |
 
-Every event also includes the anonymous installation ID, telemetry schema
-version, agent-strace version, Python major/minor version, OS family, and CI
-boolean.
+Every event also includes the anonymous installation ID, a random
+[analytics session ID](#analytics-sessions), telemetry schema version,
+agent-strace version, Python major/minor version, OS family, and CI boolean.
 
 The editor extension emits five events:
 
@@ -103,16 +103,42 @@ The editor extension emits five events:
 | `agent_strace_vscode_session_completed` | success, duration, aggregate tool-call count, aggregate error count |
 | `agent_strace_vscode_telemetry_enabled` | enablement source |
 
-Extension events also include the random extension installation ID, schema and
-extension versions, editor family/version, desktop/web UI kind, remote boolean,
-and OS family.
+Extension events also include the random extension installation ID, a random
+analytics session ID, schema and extension versions, editor family/version,
+desktop/web UI kind, remote boolean, and OS family.
 
 The schema does **not** accept prompts, responses, command arguments, file paths,
 repository names or hashes, usernames, hostnames, endpoints, trace contents,
-session IDs, model input/output, exception messages, or stack traces. PostHog
-person-profile processing and GeoIP enrichment are disabled for every event.
-Like any direct HTTPS destination, PostHog still receives the network request
-under its own infrastructure and privacy terms.
+trace or agent session IDs, model input/output, exception messages, or stack
+traces. PostHog person-profile processing and GeoIP enrichment are disabled for
+every event. Like any direct HTTPS destination, PostHog still receives the
+network request under its own infrastructure and privacy terms.
+
+## Analytics sessions
+
+PostHog's server-side SDKs send no `$session_id`, so without one every event
+stands alone and PostHog's session aggregations are empty. Each client
+therefore adds its own random
+[`$session_id`](https://posthog.com/docs/data/sessions#server-sdks-and-sessions)
+that groups one stretch of use:
+
+- agent-strace uses a fresh UUIDv7 and follows PostHog's
+  [custom session ID requirements](https://posthog.com/docs/data/sessions#custom-session-ids).
+  The UUIDv7's embedded time is the session's start, which is never later
+  than the session's first event.
+- A new session starts after 30 minutes without an event, or 24 hours after
+  the session started, matching how PostHog defines a session. A new session
+  also starts if the clock moves back before the last event or the stored
+  session is malformed. A session is never reused after it ends.
+- The CLI keeps the current session in `~/.agent-strace/telemetry.json`
+  (`analytics_session_id` and `analytics_session_last_event_ms`), so CLI
+  commands and agent hooks running in separate processes share it.
+- The extension keeps its session in memory, so each editor window has its
+  own, and a restarted window starts a new one.
+- It is random. It is never derived from, and never equals, a trace session ID
+  or an agent's session ID, so it cannot link an event to a recorded trace.
+  The CLI drops any `$session_id` or `session_id` passed as an event property.
+- Disabling telemetry deletes it with the installation ID.
 
 ## Maintainer setup
 
@@ -189,6 +215,13 @@ Create these insights:
    version.
 8. **Extension feature usage:** `agent_strace_vscode_command_completed` grouped
    by command and success.
+9. **Sessions per installation:** a trends formula `A / B` over
+   `agent_strace_cli_command_completed`, where A aggregates by **Unique
+   sessions** and B by **Unique users**. Repeat with the extension events.
+10. **Commands per session:** the same event's total count divided by its
+    **Unique sessions**, grouped by agent-strace version.
+11. **Session length:** **Property value median** of the **Session duration**
+    session property on `agent_strace_cli_command_completed`.
 
 Do not use this telemetry for billing, access control, compliance, or security
 evidence. Open-source clients and public ingestion endpoints can be modified or

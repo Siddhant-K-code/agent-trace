@@ -114,3 +114,64 @@ export function sanitiseEventProperties(
   }
   return clean;
 }
+
+// PostHog's own session rules: a new session after 30 minutes without an
+// event, and no session longer than 24 hours.
+export const SESSION_IDLE_MS = 30 * 60 * 1000;
+export const SESSION_MAX_MS = 24 * 60 * 60 * 1000;
+
+/** A random PostHog `$session_id` and when it started and was last used. */
+export interface AnalyticsSession {
+  readonly id: string;
+  readonly startedAt: number;
+  readonly lastEventAt: number;
+}
+
+export const UUIDV7_MAX_MS = 2 ** 48 - 1;
+
+/** Clamp `unixMs` to the 48-bit range a UUIDv7 timestamp can hold. */
+export function uuidv7Time(unixMs: number): number {
+  return Math.min(Math.max(0, Math.trunc(unixMs)), UUIDV7_MAX_MS);
+}
+
+/**
+ * Return a UUIDv7 (RFC 9562) for `unixMs` built from 10 random bytes.  A
+ * time outside the 48-bit range is clamped, not wrapped.
+ */
+export function uuidv7(unixMs: number, random: Uint8Array): string {
+  const bytes = new Uint8Array(16);
+  let timestamp = uuidv7Time(unixMs);
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = timestamp % 256;
+    timestamp = Math.floor(timestamp / 256);
+  }
+  bytes.set(random.subarray(0, 10), 6);
+  bytes[6] = 0x70 | (bytes[6] & 0x0f);
+  bytes[8] = 0x80 | (bytes[8] & 0x3f);
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Return the session an event sent at `now` belongs to.  The session goes
+ * on until 30 idle minutes or 24 hours have passed, or the clock moves back
+ * before its last event.  PostHog's custom session ID requirements
+ * (https://posthog.com/docs/data/sessions#custom-session-ids) leave a
+ * session out of its session analytics when its UUIDv7 time is later than
+ * its first event or more than 24 hours before its last.
+ */
+export function nextAnalyticsSession(
+  current: AnalyticsSession | undefined,
+  now: number,
+  newId: (startedAt: number) => string,
+): AnalyticsSession {
+  if (
+    current === undefined ||
+    !(current.startedAt <= current.lastEventAt && current.lastEventAt <= now) ||
+    now - current.startedAt >= SESSION_MAX_MS ||
+    now - current.lastEventAt >= SESSION_IDLE_MS
+  ) {
+    return { id: newId(now), startedAt: now, lastEventAt: now };
+  }
+  return { ...current, lastEventAt: now };
+}

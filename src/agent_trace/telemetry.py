@@ -4,7 +4,9 @@ Telemetry is enabled by default and can be disabled at any time.  Nothing is
 sent until the one-time notice has been shown or the user explicitly enabled
 telemetry.  The client sends a small allow-listed event directly to PostHog's
 public capture API.  It never reads or sends trace events, prompts, command
-arguments, file paths, repository metadata, or session identifiers.
+arguments, file paths, repository metadata, or trace session identifiers.
+Events carry a random PostHog ``$session_id`` that only groups one period of
+activity on this installation; see ``_analytics_session_id``.
 
 The PostHog project token is intentionally a public, write-only ingestion
 token.  Set ``DEFAULT_POSTHOG_PROJECT_TOKEN`` before publishing a release, or
@@ -73,12 +75,23 @@ _TIMEOUT_ENV = "AGENT_STRACE_TELEMETRY_TIMEOUT"
 # Hooks and CLI commands must never wait long on another process.
 _LOCK_TIMEOUT = 2.0
 
+# PostHog's own session rules: a new session after 30 minutes without an
+# event, and no session longer than 24 hours.
+_SESSION_IDLE_MS = 30 * 60 * 1000
+_SESSION_MAX_MS = 24 * 60 * 60 * 1000
+_SESSION_ID_KEY = "analytics_session_id"
+_SESSION_LAST_EVENT_KEY = "analytics_session_last_event_ms"
+_UUID7_MAX_MS = (1 << 48) - 1
+_UUID7 = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+
 _TRUE = {"1", "true", "yes", "on", "enabled"}
 _FALSE = {"0", "false", "no", "off", "disabled"}
 _SAFE_TEXT = re.compile(r"^[A-Za-z0-9_.:/-]{1,80}$")
 
 # Only these properties can leave the process.  Free-form command arguments,
-# exception messages, paths, trace data, and session IDs are not accepted.
+# exception messages, paths, trace data, and trace session IDs are not accepted.
 _EVENT_FIELDS: dict[str, dict[str, type]] = {
     CLI_COMMAND_COMPLETED: {
         "command": str,
@@ -229,8 +242,9 @@ def disclosure_satisfied() -> bool:
 def set_telemetry_enabled(enabled: bool) -> bool:
     """Persist the user's telemetry preference.
 
-    Disabling telemetry deletes the anonymous installation identifier.  A
-    later re-enable therefore starts with a new identity.
+    Disabling telemetry deletes the anonymous installation identifier and
+    the analytics session.  A later re-enable therefore starts with a new
+    identity.
     """
     def update(current: dict[str, Any]) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -239,9 +253,14 @@ def set_telemetry_enabled(enabled: bool) -> bool:
         }
         if enabled:
             existing_id = current.get("anonymous_id", "")
-            data["anonymous_id"] = (
-                existing_id if _valid_anonymous_id(existing_id) else uuid.uuid4().hex
-            )
+            if _valid_anonymous_id(existing_id):
+                data["anonymous_id"] = existing_id
+                # Same identity, so the current analytics session goes on.
+                for key in (_SESSION_ID_KEY, _SESSION_LAST_EVENT_KEY):
+                    if key in current:
+                        data[key] = current[key]
+            else:
+                data["anonymous_id"] = uuid.uuid4().hex
         return data
 
     return _update_config(update) is not None
@@ -273,6 +292,84 @@ def _anonymous_id() -> str:
     saved = _update_config(assign) or {}
     value = saved.get("anonymous_id", "")
     return value if _valid_anonymous_id(value) else ""
+
+
+def _uuid7_time(unix_ms: int) -> int:
+    """Clamp *unix_ms* to the 48-bit range a UUIDv7 timestamp can hold."""
+    return min(max(int(unix_ms), 0), _UUID7_MAX_MS)
+
+
+def _uuid7(unix_ms: int) -> str:
+    """Return a random UUIDv7 whose timestamp is *unix_ms* (RFC 9562).
+
+    A time outside the 48-bit range is clamped, not wrapped, so a pre-epoch
+    clock never yields a far-future start.
+    """
+    value = _uuid7_time(unix_ms) << 80
+    value |= 0x7 << 76
+    value |= int.from_bytes(os.urandom(10), "big") & ((1 << 76) - 1)
+    value &= ~(0x3 << 62)
+    value |= 0x2 << 62
+    return str(uuid.UUID(int=value))
+
+
+def _session_start_ms(session_id: Any) -> int | None:
+    """Return the start time a UUIDv7 session ID encodes, or None."""
+    if not isinstance(session_id, str) or not _UUID7.fullmatch(session_id):
+        return None
+    return int(session_id[:8] + session_id[9:13], 16)
+
+
+def _analytics_session_id() -> tuple[str, int | None]:
+    """Return the PostHog ``$session_id`` for an event sent now, and now in ms.
+
+    PostHog's server SDKs send no session ID, so its session analytics
+    (unique sessions, session duration) see nothing.  This keeps one random
+    UUIDv7 per period of activity on this installation, shared by every CLI
+    and hook process through the config.  It follows PostHog's requirements
+    for custom session IDs (https://posthog.com/docs/data/sessions#custom-session-ids):
+    it starts at or before the session's first event, and rotates after 30
+    idle minutes or 24 hours.  It is not derived from, and cannot be linked
+    to, any trace session.
+
+    The returned time is the one the rotation used, so the event's timestamp
+    stays inside the session.  Returns ("", None) when no session can be
+    stored; the event is then sent without one.
+    """
+    result: tuple[str, int | None] = ("", None)
+
+    def touch(current: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal result
+        # Disabling deletes the installation ID: a concurrent opt-out must
+        # not bring a session back.
+        if not _valid_anonymous_id(current.get("anonymous_id")):
+            return None
+        # Clamped like the UUIDv7 start, and used as the event's timestamp,
+        # so a clock outside that range never puts the start after the event.
+        now_ms = _uuid7_time(time.time() * 1000)
+        session_id = current.get(_SESSION_ID_KEY)
+        last_ms = current.get(_SESSION_LAST_EVENT_KEY)
+        start_ms = _session_start_ms(session_id)
+        # A last-event time that is not an int between the start and now is
+        # malformed or from a clock that moved back; a future one would
+        # otherwise keep the session alive until the 24-hour limit.
+        if (
+            start_ms is None
+            or not isinstance(last_ms, int)
+            or isinstance(last_ms, bool)
+            or not start_ms <= last_ms <= now_ms
+            or now_ms - start_ms >= _SESSION_MAX_MS
+            or now_ms - last_ms >= _SESSION_IDLE_MS
+        ):
+            session_id = _uuid7(now_ms)
+        current[_SESSION_ID_KEY] = session_id
+        current[_SESSION_LAST_EVENT_KEY] = now_ms
+        result = (session_id, now_ms)
+        return current
+
+    if _update_config(touch) is None:
+        return "", None
+    return result
 
 
 def _project_token() -> str:
@@ -328,14 +425,22 @@ def build_payload(
     event: str,
     properties: dict[str, Any],
     anonymous_id: str,
+    session_id: str = "",
+    timestamp_ms: int | None = None,
 ) -> dict[str, Any] | None:
-    """Build a PostHog capture payload from an allow-listed event."""
+    """Build a PostHog capture payload from an allow-listed event.
+
+    *session_id* is added as ``$session_id`` only when it is a UUIDv7.
+    *timestamp_ms* defaults to now.
+    """
     if event not in _EVENT_FIELDS or not _valid_anonymous_id(anonymous_id):
         return None
 
     import platform
 
     clean = _sanitise_properties(event, properties)
+    if _session_start_ms(session_id) is not None:
+        clean["$session_id"] = session_id
     clean.update({
         "$process_person_profile": False,
         "$geoip_disable": True,
@@ -347,12 +452,17 @@ def build_payload(
         "os": platform.system().lower() or "unknown",
         "ci": _in_ci(),
     })
+    timestamp = (
+        datetime.now(timezone.utc)
+        if timestamp_ms is None
+        else datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
+    )
     return {
         "api_key": _project_token(),
         "event": event,
         "distinct_id": anonymous_id,
         "properties": clean,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp.isoformat(),
         "uuid": str(uuid.uuid4()),
     }
 
@@ -370,7 +480,12 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> bool:
         if not disclosure_satisfied():
             return False
         anonymous_id = _anonymous_id()
-        payload = build_payload(event, properties or {}, anonymous_id)
+        if not _valid_anonymous_id(anonymous_id):
+            return False
+        session_id, timestamp_ms = _analytics_session_id()
+        payload = build_payload(
+            event, properties or {}, anonymous_id, session_id, timestamp_ms
+        )
         if payload is None:
             return False
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -518,9 +633,10 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
         f"PostHog destination: "
         f"{_posthog_host() if telemetry_configured() else 'not configured'}\n"
         "Collected: command/subcommand, success, duration, integration/export format, "
-        "agent-strace/Python version, OS, and CI flag.\n"
+        "agent-strace/Python version, OS, CI flag, a random installation ID, and a "
+        "random analytics session ID that rotates after 30 idle minutes or 24 hours.\n"
         "Never collected: prompts, responses, arguments, paths, repository data, "
-        "trace contents, session IDs, or exception messages.\n"
+        "trace contents, trace session IDs, or exception messages.\n"
     )
     return 0
 

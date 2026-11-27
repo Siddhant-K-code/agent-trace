@@ -42,6 +42,7 @@ What are the trade-offs, limitations, and follow-on effects?
 | [0013](0013-opt-in-product-telemetry.md) | Opt-in Anonymous Product Telemetry | Superseded by ADR-0014 |
 | [0014](0014-default-on-product-telemetry.md) | Default-on Anonymous Product Telemetry | Accepted |
 | [0015](0015-extension-native-product-telemetry.md) | Extension-native Product Telemetry | Accepted |
+| [0016](0016-analytics-session-ids-in-product-telemetry.md) | Analytics Session IDs in Product Telemetry | Accepted |
 
 ## Adding a new ADR
 

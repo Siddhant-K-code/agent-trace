@@ -195,7 +195,7 @@ Install **agent-strace** from the [Extensions panel](https://open-vsx.org/extens
 
 Anonymous extension usage telemetry is enabled by default, sends nothing until
 its one-time notice is shown, and can be disabled from the Command Palette or
-`agentTrace.telemetry.enabled` setting. No prompts, trace contents, paths, session IDs, command arguments, or repository data are sent.
+`agentTrace.telemetry.enabled` setting. No prompts, trace contents, paths, trace session IDs, command arguments, or repository data are sent.
 
 | Feature | Description |
 |---|---|

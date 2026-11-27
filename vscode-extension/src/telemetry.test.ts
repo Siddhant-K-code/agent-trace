@@ -8,6 +8,7 @@ import { EXTENSION_ACTIVATED } from "./telemetryCore";
 const fake = {
   settingGlobalValue: undefined as boolean | undefined,
   requests: 0,
+  bodies: [] as string[],
 };
 
 const vscodeStub = {
@@ -27,7 +28,10 @@ const httpsStub = {
   request: () => {
     fake.requests += 1;
     const noop = (): undefined => undefined;
-    return { on: noop, setTimeout: noop, end: noop, destroy: noop };
+    const end = (body?: string) => {
+      fake.bodies.push(body ?? "");
+    };
+    return { on: noop, setTimeout: noop, end, destroy: noop };
   },
 };
 
@@ -69,13 +73,15 @@ function fakeContext(noticeShown: boolean) {
   };
 }
 
-async function captureOnce(noticeShown: boolean) {
+async function captureOnce(noticeShown: boolean, times = 1) {
   const ExtensionTelemetry = await loadTelemetry();
   const context = fakeContext(noticeShown);
   const telemetry = new ExtensionTelemetry(
     context as unknown as ConstructorParameters<typeof ExtensionTelemetry>[0],
   );
-  telemetry.capture(EXTENSION_ACTIVATED);
+  for (let index = 0; index < times; index += 1) {
+    telemetry.capture(EXTENSION_ACTIVATED);
+  }
   return context.values;
 }
 
@@ -89,6 +95,7 @@ beforeEach(() => {
   }
   fake.settingGlobalValue = undefined;
   fake.requests = 0;
+  fake.bodies = [];
 });
 
 afterEach(() => {
@@ -122,4 +129,33 @@ test("sends with AGENT_STRACE_TELEMETRY=1", async () => {
   process.env.AGENT_STRACE_TELEMETRY = "1";
   await captureOnce(false);
   assert.equal(fake.requests, 1);
+});
+
+test("events from one window share a random UUIDv7 session", async () => {
+  await captureOnce(true, 2);
+  const sent = fake.bodies.map((body) => JSON.parse(body));
+  assert.equal(sent.length, 2);
+  const sessionId = sent[0].properties.$session_id;
+  assert.match(
+    sessionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(sent[1].properties.$session_id, sessionId);
+  const startedAt = parseInt(sessionId.slice(0, 8) + sessionId.slice(9, 13), 16);
+  assert.ok(startedAt <= Date.parse(sent[0].timestamp));
+});
+
+test("a pre-epoch clock never starts a session after its event", async () => {
+  const realNow = Date.now;
+  Date.now = () => -86_400_500;
+  try {
+    await captureOnce(true);
+  } finally {
+    Date.now = realNow;
+  }
+  const body = JSON.parse(fake.bodies[0]);
+  const sessionId: string = body.properties.$session_id;
+  const startedAt = parseInt(sessionId.slice(0, 8) + sessionId.slice(9, 13), 16);
+  assert.equal(startedAt, 0);
+  assert.ok(startedAt <= Date.parse(body.timestamp));
 });

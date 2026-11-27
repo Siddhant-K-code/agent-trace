@@ -7,6 +7,8 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -303,6 +305,137 @@ class TestTelemetryPayload(TelemetryTestCase):
                     {"command": "list", "success": True},
                 )
             )
+
+
+_SESSION_ID_SCRIPT = """
+import os
+from agent_trace import telemetry
+os.environ["AGENT_STRACE_TELEMETRY_CONFIG"] = sys.argv[2]
+wait_for_start()
+print(telemetry._analytics_session_id()[0])
+"""
+
+
+class TestAnalyticsSession(TelemetryTestCase):
+    """Events carry a PostHog $session_id that follows PostHog's session rules."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["AGENT_STRACE_TELEMETRY_TOKEN"] = "phc_public_project_token"
+        os.environ["AGENT_STRACE_TELEMETRY"] = "1"
+        self.now = 1_800_000_000.0
+
+    def _session_at(self, minutes):
+        with patch.object(telemetry.time, "time", return_value=self.now + minutes * 60):
+            return telemetry._analytics_session_id()[0]
+
+    def _capture(self):
+        with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
+            self.assertTrue(telemetry.capture(telemetry.SESSION_COMPLETED, {}))
+        return json.loads(urlopen.call_args.args[0].data)
+
+    def test_events_share_a_uuid7_session_that_starts_before_them(self):
+        first, second = self._capture(), self._capture()
+        session_id = first["properties"]["$session_id"]
+        self.assertEqual(second["properties"]["$session_id"], session_id)
+        self.assertEqual(uuid.UUID(session_id).version, 7)
+        start = datetime.fromtimestamp(
+            int(session_id[:8] + session_id[9:13], 16) / 1000, timezone.utc
+        )
+        for body in (first, second):
+            self.assertLessEqual(start, datetime.fromisoformat(body["timestamp"]))
+
+    def test_uuid7_clamps_times_outside_its_range(self):
+        for unix_ms, start in ((-1, 0), (-86_400_000, 0), (1 << 48, (1 << 48) - 1)):
+            with self.subTest(unix_ms=unix_ms):
+                session_id = telemetry._uuid7(unix_ms)
+                self.assertEqual(uuid.UUID(session_id).version, 7)
+                self.assertEqual(telemetry._session_start_ms(session_id), start)
+
+    def test_pre_epoch_clock_never_starts_a_session_after_its_event(self):
+        self._capture()
+        with patch.object(telemetry.time, "time", return_value=-86_400.5):
+            body = self._capture()
+        start = telemetry._session_start_ms(body["properties"]["$session_id"])
+        self.assertEqual(start, 0)
+        event_ms = datetime.fromisoformat(body["timestamp"]).timestamp() * 1000
+        self.assertLessEqual(start, event_ms)
+
+    def test_session_rotates_after_idle_time_and_maximum_length(self):
+        telemetry.set_telemetry_enabled(True)
+        first = self._session_at(0)
+        self.assertEqual(self._session_at(29), first)
+        idle = self._session_at(59)
+        self.assertNotEqual(idle, first)
+
+        # Kept active every 20 minutes, a session still ends after 24 hours.
+        sessions = {self._session_at(59 + 20 * step) for step in range(73)}
+        self.assertEqual(len(sessions), 2)
+
+        # A clock set back before the session's start starts a new one.
+        latest = self._session_at(59 + 20 * 72)
+        self.assertNotIn(self._session_at(30), {first, idle, latest})
+
+    def test_malformed_last_event_time_starts_a_new_session(self):
+        telemetry.set_telemetry_enabled(True)
+        first = self._session_at(0)
+        start_ms = telemetry._session_start_ms(first)
+
+        def session_after(last_event):
+            config = json.loads(self.config_path.read_text())
+            config["analytics_session_id"] = first
+            config["analytics_session_last_event_ms"] = last_event
+            self.config_path.write_text(json.dumps(config))
+            return self._session_at(1)
+
+        self.assertEqual(session_after(start_ms), first)
+        for last_event in (
+            start_ms + 10 * 60 * 1000,
+            start_ms - 1,
+            -1,
+            True,
+            "1",
+            float(start_ms),
+            None,
+        ):
+            with self.subTest(last_event=last_event):
+                self.assertNotEqual(session_after(last_event), first)
+
+    def test_disable_deletes_the_session_and_enable_keeps_it(self):
+        telemetry.set_telemetry_enabled(True)
+        session_id = self._session_at(0)
+        telemetry.set_telemetry_enabled(True)
+        self.assertEqual(self._session_at(1), session_id)
+
+        telemetry.set_telemetry_enabled(False)
+        self.assertNotIn(session_id, self.config_path.read_text())
+        self.assertEqual(self._session_at(2), "")
+
+        telemetry.set_telemetry_enabled(True)
+        self.assertNotIn(self._session_at(3), ("", session_id))
+
+    def test_payload_never_takes_a_session_id_from_elsewhere(self):
+        trace_session = telemetry.build_payload(
+            telemetry.SESSION_COMPLETED, {}, "a" * 32, "telemetry-session-123"
+        )
+        from_properties = telemetry.build_payload(
+            telemetry.SESSION_COMPLETED,
+            {"$session_id": telemetry._uuid7(0), "session_id": "private"},
+            "a" * 32,
+        )
+        for payload in (trace_session, from_properties):
+            self.assertNotIn("$session_id", payload["properties"])
+            self.assertNotIn("session_id", payload["properties"])
+
+    def test_concurrent_processes_agree_on_one_session(self):
+        telemetry.set_telemetry_enabled(True)
+        env = {name: os.environ.get(name, "") for name in self._ENV_NAMES}
+        with patch.dict(os.environ, env):
+            outputs = run_concurrently(
+                _SESSION_ID_SCRIPT, [[str(self.config_path)] for _ in range(8)]
+            )
+        stored = json.loads(self.config_path.read_text())["analytics_session_id"]
+        self.assertEqual({out.strip() for out in outputs}, {stored})
 
 
 class TestCliTelemetry(TelemetryTestCase):
