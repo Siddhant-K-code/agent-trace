@@ -2019,6 +2019,32 @@ nothing. Any other value, an empty one too, prints
 and exits 1. That check runs before the store is read, so `update` writes no
 profile and leaves the one at `--output` as it was.
 
+`check` and `show` read a profile file, as `update` writes, from
+`--baseline FILE` or the default path. It must be UTF-8 JSON, and may start
+with a byte order mark. With no file at the path, they print
+`No baseline found at FILE` on stderr and exit 1, and `check` adds the command
+that builds one. When they cannot read the file, they print
+`Could not read baseline file FILE: REASON` on stderr and exit 1. They cannot
+read the file when:
+
+- the path is empty
+- the path cannot be opened, such as a directory or a file without read
+  permission
+- it is not UTF-8 or not a JSON object
+- it nests more than 128 levels
+- it holds NaN, an infinity, a float out of range or an int of more than
+  4300 digits
+- `cost_usd`, `tool_calls`, `duration_ms`, `error_rate` or `llm_requests` is
+  not an object
+- in one of those, `mean`, `min` or `max` is not a number that fits in a
+  float, or `stddev` or `count` is not such a number of 0 or more
+
+A missing key reads as 0. `created_at` and `session_count` may hold any value.
+When `created_at` is not a usable time, `show` prints `build time unknown` in
+place of the build time. The `Could not read` line shows each character of
+FILE and REASON that `str.isprintable()` rejects as its escape, and `show`
+does the same for `session_count`.
+
 The profile tracks cost, tool calls, duration, error rate, and LLM requests.
 The error rate counts [failed model requests](production.md#session-error-counts) as errors; rebuild profiles saved by earlier
 versions with `baseline update` to include them.

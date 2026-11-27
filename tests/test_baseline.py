@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from functools import partialmethod
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,6 +52,11 @@ except ImportError:
     )
     from tests.test_cost import _model_request
     from tests.test_unusable_event_timestamps import restamp, set_meta
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_store_with_sessions(tmpdir: str, n: int = 10, tool_calls: int = 5) -> TraceStore:
@@ -585,6 +591,256 @@ class TestBaselineFromCodexFixture(unittest.TestCase):
         self.assertAlmostEqual(profile.cost_usd.mean, sum(costs) / 3, places=12)
         self.assertAlmostEqual(profile.cost_usd.min, min(costs), places=12)
         self.assertAlmostEqual(profile.cost_usd.max, max(costs), places=12)
+
+
+# Python 3.14 limits JSON nesting by stack size, not by a count, so it can
+# parse 100000 levels. A million levels raise RecursionError on 3.10+.
+TOO_DEEP = 1_000_000
+NOT_FINITE = "it has a number that is not finite"
+NOT_JSON = ("it is not valid JSON "
+            "(Expecting property name enclosed in double quotes at line 1 column 2)")
+
+
+def _nested(depth):
+    """A profile file that nests depth levels: an object around lists."""
+    return b'{"session_count": ' + b"[" * (depth - 1) + b"]" * (depth - 1) + b"}"
+
+
+REFUSED_PROFILES = [
+    ("empty", b"", "it is not valid JSON (Expecting value at line 1 column 1)"),
+    ("bad JSON", b"{", NOT_JSON),
+    ("not UTF-8", b"\xff\xfe{}", "it is not valid UTF-8"),
+    ("list", b"[]", "it is not a JSON object"),
+    ("null", b"null", "it is not a JSON object"),
+    ("number", b"5", "it is not a JSON object"),
+    ("deep list", b"[" * 129 + b"]" * 129, "it is nested too deeply"),
+    ("depth 129", _nested(129), "it is nested too deeply"),
+    ("too deep to parse", b"[" * TOO_DEEP + b"]" * TOO_DEEP, "it is nested too deeply"),
+    ("NaN", b'{"tool_calls": {"mean": NaN}}', NOT_FINITE),
+    ("Infinity", b'{"cost_usd": {"stddev": Infinity}}', NOT_FINITE),
+    ("-Infinity", b'{"created_at": -Infinity}', NOT_FINITE),
+    ("float too large", b'{"duration_ms": {"max": 1e400}}', NOT_FINITE),
+    ("4301 digits", b'{"session_count": 1' + b"0" * 4300 + b"}",
+     "it has a number with too many digits"),
+    ("metric number", b'{"tool_calls": 5}', "tool_calls is not an object"),
+    ("metric null", b'{"cost_usd": null}', "cost_usd is not an object"),
+    ("metric list", b'{"llm_requests": []}', "llm_requests is not an object"),
+    ("mean text", b'{"tool_calls": {"mean": "x"}}', "tool_calls.mean is not a finite number"),
+    ("mean null", b'{"duration_ms": {"mean": null}}',
+     "duration_ms.mean is not a finite number"),
+    ("mean bool", b'{"error_rate": {"mean": true}}', "error_rate.mean is not a finite number"),
+    ("mean too large", b'{"tool_calls": {"mean": 1' + b"0" * 400 + b"}}",
+     "tool_calls.mean is not a finite number"),
+    ("min text", b'{"cost_usd": {"min": "x"}}', "cost_usd.min is not a finite number"),
+    ("max null", b'{"llm_requests": {"max": null}}', "llm_requests.max is not a finite number"),
+    ("stddev text", b'{"tool_calls": {"stddev": "x"}}',
+     "tool_calls.stddev is not a number of 0 or more"),
+    ("stddev negative", b'{"tool_calls": {"stddev": -1.5}}',
+     "tool_calls.stddev is not a number of 0 or more"),
+    ("stddev bool", b'{"duration_ms": {"stddev": true}}',
+     "duration_ms.stddev is not a number of 0 or more"),
+    ("stddev too large", b'{"cost_usd": {"stddev": 1' + b"0" * 400 + b"}}",
+     "cost_usd.stddev is not a number of 0 or more"),
+    ("count text", b'{"tool_calls": {"count": "x"}}',
+     "tool_calls.count is not a number of 0 or more"),
+    ("count null", b'{"error_rate": {"count": null}}',
+     "error_rate.count is not a number of 0 or more"),
+    ("count bool", b'{"tool_calls": {"count": true}}',
+     "tool_calls.count is not a number of 0 or more"),
+    ("count negative", b'{"llm_requests": {"count": -5}}',
+     "llm_requests.count is not a number of 0 or more"),
+]
+
+ACCEPTED_PROFILES = [
+    ("empty object", b"{}"),
+    ("depth 128", _nested(128)),
+    ("4300 digits and a sign", b'{"session_count": -1' + b"0" * 4299 + b"}"),
+    ("negative stats", b'{"tool_calls": {"mean": -12, "stddev": 1, "min": -14, "max": -10, '
+     b'"count": 5}}'),
+    ("fractional count", b'{"tool_calls": {"mean": 12, "stddev": 1.5, "count": 2.5}}'),
+    ("float count", b'{"tool_calls": {"mean": 12, "stddev": 1.5, "count": 5.0}}'),
+    ("zero stddev", b'{"tool_calls": {"mean": 12, "stddev": 0, "count": 5}}'),
+    ("any created_at and session_count",
+     b'{"created_at": "x", "session_count": {"n": [true, null]}}'),
+    ("huge numbers", b'{"duration_ms": {"mean": 1e308, "stddev": 1e308, "min": -1e308, '
+     b'"max": 1e308, "count": 1e308}}'),
+    ("extra keys", b'{"note": "x", "tool_calls": {"mean": 12, "note": "x"}}'),
+]
+
+
+def _open_error(path):
+    """The reason open() gives for path, or None when it opens."""
+    try:
+        with open(path, "rb"):
+            return None
+    except OSError as exc:
+        return exc.strerror
+
+
+class TestUnreadableBaselineFile(unittest.TestCase):
+    """check and show read a profile file the same way. When they cannot read
+    one, they print one line on stderr that names it, print nothing on stdout
+    and exit 1."""
+
+    def setUp(self):
+        store_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(store_dir.cleanup)
+        self.trace_dir = store_dir.name
+        files_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(files_dir.cleanup)
+        self.files = Path(files_dir.name)
+        store = TraceStore(self.trace_dir)
+        for i, calls in enumerate((10, 11, 12, 13, 14)):
+            meta = SessionMeta(agent_name="normal")
+            meta.tool_calls = calls
+            meta.started_at = time.time() - 3600 * (i + 2)
+            meta.ended_at = meta.started_at + 60
+            store.create_session(meta)
+            store.update_meta(meta)
+        self.sid = meta.session_id
+        self.good = self.files / "good.json"
+        save_baseline(build_baseline(store, since_days=30), str(self.good))
+
+    def _run(self, argv):
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, "baseline", *argv])
+        out, err = io.StringIO(), io.StringIO()
+        # AnomalyResult.format writes to the sys.stdout that baseline.py saw on
+        # import. Point it at the buffer.
+        with patch("sys.stdout", out), patch("sys.stderr", err), \
+                patch.object(AnomalyResult, "format",
+                             partialmethod(AnomalyResult.format, out=out)):
+            code = cmd_baseline(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def _check(self, path):
+        return self._run(["check", self.sid, "--baseline", path])
+
+    def _show(self, path):
+        return self._run(["show", "--baseline", path])
+
+    def _forms(self, path):
+        return {"check": lambda: self._check(path), "show": lambda: self._show(path)}
+
+    def _file(self, name, data):
+        path = self.files / name
+        path.write_bytes(data)
+        return str(path)
+
+    def _open_reason(self, path):
+        reason = _open_error(path)
+        self.assertIsNotNone(reason, "the test file opened")
+        return reason
+
+    def _assert_refused(self, label, path, reason, shown=None):
+        shown = path if shown is None else shown
+        line = f"Could not read baseline file {shown}: {reason}\n"
+        for form, run in self._forms(path).items():
+            with self.subTest(case=label, form=form):
+                self.assertEqual(run(), (1, "", line))
+
+    def test_refuses_a_file_it_cannot_use(self):
+        for label, data, reason in REFUSED_PROFILES:
+            self._assert_refused(label, self._file("baseline.json", data), reason)
+
+    def test_reads_a_file_it_can_use(self):
+        for label, data in ACCEPTED_PROFILES:
+            path = self._file("baseline.json", data)
+            for form, run in self._forms(path).items():
+                with self.subTest(case=label, form=form):
+                    code, out, err = run()
+                    self.assertIn(code, (0, 1))
+                    self.assertEqual(err, "")
+                    self.assertNotEqual(out, "")
+
+    def test_no_file_at_the_path_keeps_the_not_found_lines(self):
+        missing = self.files / "missing.json"
+        paths = {"missing": str(missing)}
+        link = self.files / "dangling.json"
+        try:
+            link.symlink_to(missing)
+        except OSError:
+            pass
+        else:
+            paths["dangling symlink"] = str(link)
+        for label, path in paths.items():
+            with self.subTest(case=label):
+                self.assertEqual(self._check(path), (
+                    1, "", f"No baseline found at {path}. Run: agent-strace baseline update\n"))
+                self.assertEqual(self._show(path), (1, "", f"No baseline found at {path}\n"))
+
+    def test_refuses_a_path_it_cannot_open(self):
+        folder = self.files / "dir"
+        folder.mkdir()
+        cases = {"directory": folder, "path through a file": self.good / "baseline.json"}
+        loop = self.files / "loop.json"
+        try:
+            loop.symlink_to(loop)
+        except OSError:
+            pass
+        else:
+            cases["symlink loop"] = loop
+        for label, path in cases.items():
+            self._assert_refused(label, str(path), self._open_reason(path))
+
+    def test_refuses_a_path_it_has_no_permission_to_read(self):
+        locked = Path(self._file("locked.json", self.good.read_bytes()))
+        folder = self.files / "locked"
+        folder.mkdir()
+        inside = folder / "baseline.json"
+        inside.write_bytes(self.good.read_bytes())
+        for path in (locked, folder):
+            path.chmod(0)
+            self.addCleanup(path.chmod, 0o700)
+        if _open_error(locked) is None:
+            self.skipTest("this user can read a file with mode 0")
+        for label, path in (("mode 0 file", locked), ("file in a mode 0 directory", inside)):
+            self._assert_refused(label, str(path), self._open_reason(path))
+
+    def test_empty_path(self):
+        self._assert_refused("empty path", "", "the path is empty", shown="''")
+
+    def test_path_shows_escapes_as_text(self):
+        path = self.files / f"bad{_escapes.PAYLOAD}.json"
+        try:
+            path.write_bytes(b"{")
+        except OSError:
+            self.skipTest("this file system refuses control characters in a file name")
+        shown = f"{self.files}/bad{_escapes.PAYLOAD_TEXT}.json"
+        self._assert_refused("escapes in the path", str(path), NOT_JSON, shown=shown)
+
+    def test_reads_a_file_that_starts_with_a_byte_order_mark(self):
+        good = self._forms(str(self.good))
+        bom = self._forms(self._file("bom.json", b"\xef\xbb\xbf" + self.good.read_bytes()))
+        for form, run in good.items():
+            with self.subTest(form=form):
+                expected = run()
+                self.assertEqual(expected[2], "")
+                self.assertEqual(bom[form](), expected)
+
+    def test_show_says_build_time_unknown_for_an_unusable_created_at(self):
+        for label, value in (("null", b"null"), ("bool", b"true"), ("negative", b"-1"),
+                             ("text", b'"x"'), ("too late", b"1e300")):
+            path = self._file("baseline.json",
+                              b'{"created_at": ' + value + b', "session_count": 5}')
+            with self.subTest(created_at=label):
+                code, out, err = self._show(path)
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn("\nBaseline (5 sessions, build time unknown)\n", out)
+
+    def test_show_prints_a_build_time_of_0(self):
+        built = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(0))
+        for label, data in (("0", b'{"created_at": 0, "session_count": 5}'),
+                            ("missing", b'{"session_count": 5}')):
+            with self.subTest(created_at=label):
+                code, out, err = self._show(self._file("baseline.json", data))
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn(f"\nBaseline (5 sessions, built {built})\n", out)
+
+    def test_show_prints_escapes_in_the_session_count_as_text(self):
+        data = json.dumps({"session_count": _escapes.PAYLOAD}).encode()
+        code, out, err = self._show(self._file("baseline.json", data))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"\nBaseline ({_escapes.PAYLOAD_TEXT} sessions, built ", out)
 
 
 if __name__ == "__main__":
