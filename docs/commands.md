@@ -2339,7 +2339,9 @@ agent-strace cognitive-debt [--session ID] [--since DATE] [--until DATE]
                             [--format text|json|badge] [--output FILE]
                             [--github-token TOKEN]
 ```
-Measure review coverage for agent-written code from trace file-write events and local git history. The metric is reported at repository and workflow scope. It does not measure code quality, claim causation, or rank individuals. The report works without a GitHub token. When git history is unavailable, affected review state is unknown rather than zero review. See the [cognitive debt badge guide](cognitive-debt.md) for the versioned JSON contract, Shields output, CI upload, and release examples.
+Measure review coverage for agent-written code from trace write events and git history. The metric is reported at repository and workflow scope. It does not measure code quality, claim causation, or rank individuals. The report works without a GitHub token. When git history is unavailable, affected review state is unknown rather than zero review. See the [cognitive debt badge guide](cognitive-debt.md) for the versioned JSON contract, Shields output, CI upload, and release examples.
+
+Each write counts the lines it adds, read from the argument shapes of Claude Code, Codex, GitHub Copilot CLI, Cursor and Gemini CLI. Failed and dry-run calls are not counted. Local review evidence is read from the session's branch only, and only a `Reviewed-by:` trailer naming another person counts (weight 0.75). With `--github-token`, reviews and comments by people other than the pull request author count; a merged pull request alone does not. When the recorded `working_dir` is missing, git runs in the current checkout if one of its remotes names the session's `git_repo`. See [Agent-written lines](cognitive-debt-review-coverage.md#agent-written-lines) and [Review evidence](cognitive-debt-review-coverage.md#review-evidence) for every rule and weight.
 
 | Flag | Description |
 |---|---|
@@ -2350,7 +2352,7 @@ Measure review coverage for agent-written code from trace file-write events and 
 | `--threshold N` | Label known unreviewed coverage above this ratio; default is `0.7` |
 | `--format text|json|badge` | Terminal text, versioned machine JSON, or Shields static JSON |
 | `--output FILE`, `-o FILE` | Atomically write the complete output to a file |
-| `--github-token TOKEN` | Optional GitHub token for merged PR review/comment enrichment; local git works without it |
+| `--github-token TOKEN` | Optional GitHub token for merged PR review and comment evidence; local git works without it |
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
@@ -3927,7 +3929,7 @@ permissions:
   pull-requests: write
 
 steps:
-  - uses: Siddhant-K-code/agent-trace@v0.125.1
+  - uses: Siddhant-K-code/agent-trace@v0.126.0
     with:
       config: .agent-evals.yaml
       baseline: .agent-evals-baseline.json

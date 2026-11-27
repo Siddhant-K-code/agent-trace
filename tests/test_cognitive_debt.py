@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace import cognitive_debt
 from agent_trace.cli import build_parser
 from agent_trace.cognitive_debt import (
     CognitiveDebtInputError,
@@ -343,7 +344,7 @@ class TestCognitiveDebtScoring(unittest.TestCase):
             }
             with patch(
                 "agent_trace.cognitive_debt._review_for_file",
-                side_effect=lambda _cwd, path, _since, _lines: reviews[path],
+                side_effect=lambda _cwd, path, _since, _lines, **_kwargs: reviews[path],
             ):
                 report = build_cognitive_debt_report(
                     store,
@@ -432,6 +433,335 @@ class TestCognitiveDebtScoring(unittest.TestCase):
         self.assertAlmostEqual(args.threshold, 0.8)
         self.assertEqual(args.format, "badge")
         self.assertEqual(args.output, "badge.json")
+
+
+def _call(tool_name, arguments):
+    return TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        data={"tool_name": tool_name, "arguments": arguments},
+    )
+
+
+def _result(call, **data):
+    return TraceEvent(event_type=EventType.TOOL_RESULT, parent_id=call.event_id, data=data)
+
+
+def _lines(count, prefix="line"):
+    return "".join(f"{prefix} {index}\n" for index in range(count))
+
+
+def _coverage(events):
+    """Return (lines per file, lines with no path) for *events*."""
+    return cognitive_debt._modified_file_coverage(events)
+
+
+class TestAgentWrittenLines(unittest.TestCase):
+    """Each agent's write tools count the lines they add.
+
+    Argument shapes follow tests/fixtures/capture_matrix/ and the trace of
+    agent-trace-demo PR #1 (Copilot CLI 1.0.103).
+    """
+
+    def test_copilot_create_and_edit_count_the_lines_of_a_49_line_change(self):
+        init_old = 'from .words import word_count\n\n__all__ = ["word_count"]\n'
+        init_new = (
+            "from .sentences import sentence_count\n"
+            "from .words import word_count\n\n"
+            '__all__ = ["sentence_count", "word_count"]\n'
+        )
+        calls = [
+            _call("create", {"path": "/repo/src/tinytext/sentences.py", "file_text": _lines(8)}),
+            _call("create", {"path": "/repo/tests/test_sentences.py", "file_text": _lines(26)}),
+            _call("edit", {"path": "/repo/src/tinytext/__init__.py", "old_str": init_old, "new_str": init_new}),
+            _call("edit", {
+                "path": "/repo/README.md",
+                "old_str": "Run the tests:",
+                "new_str": _lines(13, "readme") + "Run the tests:",
+            }),
+            _call("bash", {"command": "python -m unittest", "description": "Run tests"}),
+        ]
+        events = [event for call in calls for event in (call, _result(call, success=True))]
+
+        files, unknown = _coverage(events)
+
+        self.assertEqual(files, {
+            "/repo/src/tinytext/sentences.py": 8,
+            "/repo/tests/test_sentences.py": 26,
+            "/repo/src/tinytext/__init__.py": 2,
+            "/repo/README.md": 13,
+        })
+        self.assertEqual(sum(files.values()), 49)
+        self.assertEqual(unknown, 0)
+
+    def test_claude_write_edit_multiedit_and_notebookedit(self):
+        events = [
+            _call("Write", {"file_path": "a.py", "content": "a\nb\nc\n"}),
+            _call("Edit", {"file_path": "b.py", "old_string": "x\ny", "new_string": "x\nY\nz", "replace_all": False}),
+            _call("MultiEdit", {"file_path": "c.py", "edits": [
+                {"old_string": "p", "new_string": "p\nq"},
+                {"old_string": "r", "new_string": "R"},
+            ]}),
+            _call("NotebookEdit", {"notebook_path": "n.ipynb", "cell_id": "1", "new_source": "s\nt"}),
+            _call("NotebookEdit", {"notebook_path": "gone.ipynb", "cell_id": "2", "new_source": "", "edit_mode": "delete"}),
+            _call("TodoWrite", {"todos": [{"content": "write the edit", "status": "pending"}]}),
+        ]
+
+        self.assertEqual(_coverage(events), ({"a.py": 3, "b.py": 2, "c.py": 2, "n.ipynb": 2}, 0))
+
+    def test_gemini_write_file_and_replace(self):
+        events = [
+            _call("write_file", {"file_path": "w.py", "content": "1\n2\n3\n4\n"}),
+            _call("replace", {"file_path": "r.py", "old_string": "a", "new_string": "b", "expected_replacements": 3}),
+            _call("write_todos", {"todos": [{"description": "edit r.py", "status": "pending"}]}),
+        ]
+
+        self.assertEqual(_coverage(events), ({"w.py": 4, "r.py": 3}, 0))
+
+    def test_codex_apply_patch_counts_each_file(self):
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Add File: new.py\n+one\n+two\n"
+            "*** Update File: changed.py\n@@\n-old\n+new\n+more\n"
+            "*** Delete File: gone.py\n"
+            "*** Update File: old_name.py\n*** Move to: new_name.py\n@@\n-q\n+r\n"
+            "*** End Patch\n"
+        )
+        codex = _call("apply_patch", {"command": patch_text})
+        raw = _call("apply_patch", patch_text)
+
+        expected = ({"new.py": 2, "changed.py": 2, "new_name.py": 1}, 0)
+        self.assertEqual(_coverage([codex]), expected)
+        self.assertEqual(_coverage([raw]), expected)
+
+    def test_cursor_file_write_counts_its_edits(self):
+        event = TraceEvent(
+            event_type=EventType.FILE_WRITE,
+            data={"path": "src/x.py", "edits": [
+                {"old_string": "a", "new_string": "a\nb"},
+                {"old_string": "", "new_string": "c\nd\ne"},
+            ]},
+        )
+
+        self.assertEqual(modified_file_lines([event]), {"src/x.py": 4})
+
+    def test_editor_and_mcp_write_tools(self):
+        events = [
+            _call("str_replace_based_edit_tool", {"command": "create", "path": "e.py", "file_text": "1\n2\n"}),
+            _call("str_replace_based_edit_tool", {"command": "view", "path": "v.py"}),
+            _call("mcp__filesystem__write_file", {"path": "m.py", "content": "1\n2\n3\n"}),
+            _call("mcp__github__create_issue", {"path": "not-a-write.md", "body": "x"}),
+        ]
+
+        self.assertEqual(_coverage(events), ({"e.py": 2, "m.py": 3}, 0))
+
+    def test_failed_write_is_not_counted(self):
+        error_call = _call("Write", {"file_path": "error.py", "content": "a\n"})
+        is_error_call = _call("Write", {"file_path": "is_error.py", "content": "a\n"})
+        unsuccessful_call = _call("apply_patch", {})
+        ok_call = _call("Write", {"file_path": "ok.py", "content": "a\n"})
+        events = [
+            error_call,
+            TraceEvent(event_type=EventType.ERROR, parent_id=error_call.event_id, data={"error": "denied"}),
+            is_error_call,
+            _result(is_error_call, is_error=True),
+            unsuccessful_call,
+            _result(unsuccessful_call, success=False),
+            ok_call,
+            _result(ok_call, success=True),
+        ]
+
+        self.assertEqual(_coverage(events), ({"ok.py": 1}, 0))
+
+    def test_write_with_unrecorded_content_counts_one_line(self):
+        events = [
+            _call("create", {"path": "omitted.py", "file_text": "[OMITTED]"}),
+            TraceEvent(event_type=EventType.FILE_WRITE, data={"path": "cursor.py"}),
+        ]
+
+        self.assertEqual(modified_file_lines(events), {"omitted.py": 1, "cursor.py": 1})
+
+    def test_malformed_write_arguments_fail_closed(self):
+        for event, message in (
+            (_call("Write", ["a.py"]), "write tool arguments must be an object"),
+            (_call(7, {"file_path": "a.py"}), "write tool name must be a string"),
+            (_call("Edit", {"file_path": 3, "new_string": "x"}), "write event file_path must be a string"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(CognitiveDebtInputError, message):
+                    modified_file_lines([event])
+
+
+def _commit(repo, path, message, author="Dev <dev@example.com>"):
+    target = Path(repo) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(f"{message}\n")
+    _git(repo, "add", path)
+    _git(repo, "commit", "-q", "--author", author, "-m", message)
+
+
+def _init_repo(path, remote=""):
+    path.mkdir(parents=True)
+    _git(str(path), "init", "-q", "-b", "main")
+    _git(str(path), "config", "user.email", "dev@example.com")
+    _git(str(path), "config", "user.name", "Dev")
+    _git(str(path), "config", "commit.gpgsign", "false")
+    if remote:
+        _git(str(path), "remote", "add", "origin", remote)
+    return str(path)
+
+
+class TestLocalReviewSignals(unittest.TestCase):
+    """Only a Reviewed-by trailer naming another person, on the session's
+    branch, counts as local review evidence."""
+
+    def review(self, repo):
+        """Return (reviewed lines, review signals, review state) for app.py."""
+        with tempfile.TemporaryDirectory() as traces:
+            store = TraceStore(Path(traces))
+            meta = _make_store_session(store, repo, started_at=time.time() - 3600)
+            _append_write(store, meta, "app.py", 20)
+            report = build_cognitive_debt_report(
+                store,
+                window_start=time.time() - 7200,
+                window_end=time.time() + 60,
+            )
+        (file_debt,) = report.sessions[0].files
+        return file_debt.human_reviewed_lines, file_debt.review_signals, file_debt.review_state
+
+    def test_words_co_author_trailers_and_other_authors_are_not_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add pipeline outline\n\nCo-authored-by: Copilot <copilot@github.com>")
+            _commit(repo, "app.py", "Address comment on line 3 (#12)", author="Other <other@example.com>")
+            _commit(repo, "app.py", "Merge pull request #12 from acme/review-fixes")
+
+            self.assertEqual(self.review(repo), (0, ["committed_after_session"], "known"))
+
+    def test_commit_on_another_branch_is_not_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app")
+            _git(repo, "checkout", "-q", "-b", "other")
+            _commit(repo, "app.py", "Tweak app\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+            _git(repo, "checkout", "-q", "main")
+
+            self.assertEqual(self.review(repo), (0, ["committed_after_session"], "known"))
+
+    def test_self_and_agent_reviewed_by_trailers_are_not_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app\n\nReviewed-by: Dev <DEV@example.com>")
+            _commit(repo, "app.py", "Fix app\n\nReviewed-by: Claude <noreply@anthropic.com>")
+            _commit(repo, "app.py", "Fix app\n\nReviewed-by: Dev")
+
+            self.assertEqual(self.review(repo), (0, ["committed_after_session"], "known"))
+
+    def test_reviewed_by_another_person_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+
+            self.assertEqual(
+                self.review(repo), (15, ["committed_after_session", "reviewed_by_trailer"], "known")
+            )
+
+    def test_repository_without_commits_is_not_committed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+
+            self.assertEqual(self.review(repo), (0, ["not_committed"], "known"))
+
+
+class TestGitHubReviewSignals(unittest.TestCase):
+    def review(self, responses, cwd, path):
+        replies = iter(responses)
+        with patch("agent_trace.cognitive_debt._github_repo", return_value=("acme", "widgets")), patch(
+            "agent_trace.cognitive_debt._github_json", side_effect=lambda *_args: next(replies)
+        ):
+            return cognitive_debt._github_review_for_file(cwd, "feature", path, "token", 20)
+
+    def test_merged_pr_with_only_author_bot_and_pending_reviews_is_unreviewed(self):
+        search = {"items": [{"number": 5, "user": {"login": "dev"}}]}
+        reviews = [
+            {"user": {"login": "dev"}, "state": "APPROVED"},
+            {"user": {"login": "copilot-pull-request-reviewer", "type": "Bot"}, "state": "COMMENTED"},
+            {"user": {"login": "jane"}, "state": "PENDING"},
+        ]
+        comments = [
+            {"user": {"login": "github-actions[bot]"}, "path": "app.py"},
+            {"user": {"login": "Dev"}, "path": "app.py"},
+        ]
+
+        self.assertEqual(
+            self.review([search, reviews, comments], ".", "app.py"), (0, ["github_merged_pr"])
+        )
+
+    def test_line_comment_from_another_person_matches_an_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            search = {"items": [{"number": 5, "user": {"login": "dev"}}]}
+            reviews = [{"user": {"login": "jane"}, "state": "APPROVED"}]
+            comments = [{"user": {"login": "jane"}, "path": "src/app.py"}]
+
+            result = self.review([search, reviews, comments], repo, str(Path(repo) / "src" / "app.py"))
+
+        self.assertEqual(
+            result,
+            (20, ["github_line_comments", "github_merged_pr", "github_review_comments", "github_reviews"]),
+        )
+
+
+class TestMissingWorkingDirectory(unittest.TestCase):
+    """A session read from another clone uses that clone's history when the
+    recorded directory is gone and the repository matches."""
+
+    def setUp(self):
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+
+    def report(self, tmp, remote, recorded_repo):
+        checkout = _init_repo(Path(tmp) / "checkout", remote)
+        _commit(checkout, "src/app.py", "Add app")
+        recorded = str(Path(tmp) / "gone" / "project")
+        store = TraceStore(Path(tmp) / "traces")
+        meta = _make_store_session(store, recorded)
+        meta.attribution["git_repo"] = recorded_repo
+        store.update_meta(meta)
+        _append_write(store, meta, os.path.join(recorded, "src", "app.py"), 4)
+        _append_write(store, meta, "/elsewhere/other.py", 2)
+        os.chdir(Path(checkout) / "src")
+        return build_cognitive_debt_report(
+            store,
+            window_start=time.time() - 60,
+            window_end=time.time() + 60,
+        )
+
+    def test_matching_repository_reads_the_current_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self.report(
+                tmp, "https://github.com/Acme/Widgets", "git@github.com:acme/widgets.git"
+            )
+
+        files = {Path(item.path).name: item for item in report.sessions[0].files}
+        self.assertTrue(report.git_available)
+        self.assertTrue(files["app.py"].path.startswith(str(Path(tmp) / "gone")))
+        self.assertEqual(files["app.py"].review_state, "known")
+        self.assertEqual(files["app.py"].review_signals, ["committed_after_session"])
+        self.assertEqual(files["other.py"].review_state, "unknown")
+        self.assertEqual(files["other.py"].review_signals, ["not_in_checkout"])
+        self.assertEqual(report.total_unreviewed_lines, 4)
+        self.assertEqual(report.total_unknown_review_lines, 2)
+
+    def test_other_repository_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self.report(
+                tmp, "https://github.com/acme/other", "https://github.com/acme/widgets.git"
+            )
+
+        self.assertFalse(report.git_available)
+        self.assertEqual(report.status, "unknown")
+        self.assertEqual(report.total_unknown_review_lines, 6)
 
 
 def _debt_report(branch="plain", group="plain", path="plain", review_state="known"):

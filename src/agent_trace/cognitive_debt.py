@@ -8,6 +8,7 @@ much of that code has review evidence.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -18,14 +19,24 @@ import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
 from .budget_report import _parse_date
-from .event_data import require_object_event_data
+from .event_data import (
+    EDIT_TOOLS,
+    FILE_EVENT_PATH_KEYS,
+    PATH_KEYS,
+    is_edit,
+    patch_paths,
+    require_object_event_data,
+    tool_arguments,
+)
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
+from .pairing import pair_tool_events
 from .store import (
     AmbiguousSessionPrefixError,
     InvalidSessionIDError,
@@ -306,9 +317,81 @@ def _meta_attr(meta: SessionMeta) -> dict:
     return attr if isinstance(attr, dict) else {}
 
 
-def _working_dir(meta: SessionMeta) -> str:
+_REMOTE_URL = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?/*$",
+    re.IGNORECASE,
+)
+
+
+def _remote_identity(url: str) -> str:
+    """Return a git remote URL as lower-case ``host/owner/repo``, or "" if it is not one."""
+    match = _REMOTE_URL.match(url.strip())
+    if not match:
+        return ""
+    return f"{match.group(1)}/{match.group(2).strip('/')}".lower()
+
+
+def _remote_identities(cwd: str) -> set[str]:
+    raw = _git(cwd, "config", "--get-regexp", r"^remote\..*\.url$")
+    identities = set()
+    for line in raw.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            identity = _remote_identity(parts[1])
+            if identity:
+                identities.add(identity)
+    return identities
+
+
+@dataclass(frozen=True)
+class _Checkout:
+    """Where git runs for one session.
+
+    ``cwd`` is the directory git runs in. ``recorded_dir`` is the session's
+    recorded working directory, or "". ``fallback`` is True when the recorded
+    directory is missing and ``cwd`` is the current checkout of the same
+    repository.
+    """
+
+    cwd: str
+    recorded_dir: str
+    fallback: bool = False
+
+
+def _resolve_checkout(meta: SessionMeta) -> _Checkout:
     attr = _meta_attr(meta)
-    return str(attr.get("working_dir") or os.getcwd())
+    recorded = str(attr.get("working_dir") or "")
+    if not recorded:
+        return _Checkout(os.getcwd(), "")
+    if os.path.isdir(recorded):
+        return _Checkout(recorded, recorded)
+    expected = _remote_identity(str(attr.get("git_repo") or ""))
+    toplevel = _git(os.getcwd(), "rev-parse", "--show-toplevel") if expected else ""
+    if toplevel and expected in _remote_identities(toplevel):
+        return _Checkout(toplevel, recorded, fallback=True)
+    return _Checkout(recorded, recorded)
+
+
+def _checkout_path(checkout: _Checkout, path: str) -> str | None:
+    """Return *path* as git in ``checkout.cwd`` must see it.
+
+    Outside fallback mode the recorded path is used as is. In fallback mode a
+    path under the recorded directory is moved to the same place in the
+    current checkout. None means the current checkout has no such file.
+    """
+    if not checkout.fallback:
+        return path
+    if os.path.isabs(path):
+        try:
+            rel = os.path.relpath(os.path.normpath(path), os.path.normpath(checkout.recorded_dir))
+        except ValueError:
+            return None
+        if rel in (os.curdir, os.pardir) or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+            return None
+        mapped = os.path.join(checkout.cwd, rel)
+    else:
+        mapped = os.path.join(checkout.cwd, path)
+    return mapped if os.path.exists(mapped) else None
 
 
 def _repository(meta: SessionMeta, cwd: str) -> str:
@@ -344,15 +427,53 @@ def _author(meta: SessionMeta, cwd: str) -> str:
     )
 
 
-_WRITE_TOOLS = {
-    "write",
-    "edit",
-    "multiedit",
-    "write_file",
-    "edit_file",
-    "replace",
-    "str_replace",
-}
+# Tool names that write files when they are the last part of an MCP tool name,
+# such as mcp__filesystem__write_file. Single words such as "edit" or "create"
+# are too common in other MCP tools to count there.
+_MCP_WRITE_TOOLS = frozenset(name for name in EDIT_TOOLS if "_" in name) - {"delete_file"}
+_MCP_SEPARATORS = ("__", "/", "-", ".")
+# Tools that remove files. They write no lines.
+_DELETE_TOOLS = frozenset({"delete_file"})
+# Argument keys that hold the whole new text of a file or cell.
+_FULL_CONTENT_KEYS = ("content", "file_text", "new_source", "code_edit", "text")
+# (old text, new text) argument keys, one pair per tool family.
+_EDIT_PAIRS = (
+    ("old_string", "new_string"),
+    ("old_str", "new_str"),
+    ("old_text", "new_text"),
+    ("oldText", "newText"),
+)
+# Argument keys that can hold apply_patch text.
+_PATCH_TEXT_KEYS = ("command", "input", "patch")
+# Event and argument keys that can hold a unified diff.
+_DIFF_KEYS = ("diff", "patch")
+_PATCH_SECTION = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.*)$")
+# Above this many old plus new lines an edit counts every new line instead of
+# running a line diff.
+_MAX_DIFF_LINES = 20_000
+
+
+def _tool_name(event: TraceEvent) -> str:
+    tool_value = event.data.get("tool_name", "")
+    if not isinstance(tool_value, str):
+        raise CognitiveDebtInputError("write tool name must be a string")
+    name = tool_value.lower()
+    if name in EDIT_TOOLS or name == "str_replace":
+        return name
+    for separator in _MCP_SEPARATORS:
+        if separator in name:
+            last = name.rsplit(separator, 1)[1]
+            if last in _MCP_WRITE_TOOLS:
+                return last
+    return name
+
+
+def _write_arguments(event: TraceEvent) -> tuple[Mapping[str, Any], str | None]:
+    for key in ("arguments", "tool_input"):
+        value = event.data.get(key)
+        if value is not None and not isinstance(value, (Mapping, str)):
+            raise CognitiveDebtInputError("write tool arguments must be an object")
+    return tool_arguments(event)
 
 
 def _is_write_event(event: TraceEvent) -> bool:
@@ -360,19 +481,13 @@ def _is_write_event(event: TraceEvent) -> bool:
         return True
     if event.event_type != EventType.TOOL_CALL:
         return False
-    tool_value = event.data.get("tool_name", "")
-    if not isinstance(tool_value, str):
-        raise CognitiveDebtInputError("write tool name must be a string")
-    tool = tool_value.lower()
-    return (
-        tool in _WRITE_TOOLS
-        or "write" in tool
-        or "edit" in tool
-        or "replace" in tool
-    )
+    name = _tool_name(event)
+    if not is_edit(event, name):
+        return False
+    return tool_arguments(event)[0].get("dryRun") is not True
 
 
-def _event_path_value(data: dict, keys: tuple[str, ...]) -> str:
+def _event_path_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = data.get(key)
         if value in (None, ""):
@@ -385,58 +500,149 @@ def _event_path_value(data: dict, keys: tuple[str, ...]) -> str:
 
 def _path_from_event(event: TraceEvent) -> str:
     if event.event_type == EventType.FILE_WRITE:
-        return _event_path_value(event.data, ("path", "file_path", "uri"))
+        return _event_path_value(event.data, FILE_EVENT_PATH_KEYS)
     if event.event_type != EventType.TOOL_CALL:
         return ""
     if not _is_write_event(event):
         return ""
-    args = event.data.get("arguments", {})
-    if args is None:
-        args = {}
-    if not isinstance(args, dict):
-        raise CognitiveDebtInputError("write tool arguments must be an object")
-    return _event_path_value(args, ("file_path", "path"))
+    args, _ = _write_arguments(event)
+    return _event_path_value(args, PATH_KEYS)
 
 
-def _line_count(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        if not value:
-            return 0
-        return max(1, len(value.splitlines()))
-    if isinstance(value, list):
-        return sum(_line_count(item) for item in value)
-    if isinstance(value, dict):
-        keys = (
-            "content",
-            "text",
-            "new_text",
-            "new_string",
-            "replacement",
-        )
-        return sum(_line_count(value.get(key)) for key in keys)
-    return 0
+def _added_lines(old: str, new: str) -> int:
+    """Return how many lines of *new* a line diff from *old* adds or changes."""
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    if not old_lines or len(old_lines) + len(new_lines) > _MAX_DIFF_LINES:
+        return len(new_lines)
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    return sum(
+        j2 - j1
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
+        if tag in ("replace", "insert")
+    )
 
 
-def _patch_added_lines(text: str) -> int:
+def _diff_added_lines(text: str) -> int:
+    """Return the added lines in a unified diff, without ``+++`` file headers."""
     added = 0
+    previous = ""
     for line in text.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
+        if line.startswith("+") and not (line.startswith("+++") and previous.startswith("---")):
             added += 1
+        previous = line
     return added
 
 
-def _event_line_count(event: TraceEvent) -> int:
-    data = event.data
-    args = data.get("arguments", {}) if isinstance(data.get("arguments", {}), dict) else {}
-    total = _line_count(data) + _line_count(args)
-    for source in (data, args):
-        for key in ("patch", "diff"):
-            value = source.get(key) if isinstance(source, dict) else None
-            if isinstance(value, str):
-                total += _patch_added_lines(value)
-    return max(1, total)
+def _patch_sections(text: str) -> list[tuple[str, int, bool]]:
+    """Return (path, added lines, deleted) for each file an apply_patch text names.
+
+    A ``*** Move to:`` line renames the file of the section it is in. Every
+    line in a section that starts with ``+`` is an added line.
+    """
+    sections: list[list[Any]] = []
+    current: list[Any] | None = None
+    for line in text.splitlines():
+        match = _PATCH_SECTION.match(line)
+        if match:
+            kind, path = match.group(1), match.group(2).strip()
+            if kind == "Move to":
+                if current is not None and path:
+                    current[0] = path
+                continue
+            current = [path, 0, kind == "Delete File"]
+            sections.append(current)
+            continue
+        if current is not None and line.startswith("+"):
+            current[1] += 1
+    return [(path, added, deleted) for path, added, deleted in sections]
+
+
+def _patch_text(args: Mapping[str, Any], raw: str | None) -> str | None:
+    candidates = [args.get(key) for key in _PATCH_TEXT_KEYS]
+    candidates.append(raw)
+    for value in candidates:
+        if isinstance(value, str) and patch_paths(value):
+            return value
+    return None
+
+
+def _pair_lines(source: Mapping[str, Any]) -> int | None:
+    """Return the lines an (old, new) edit adds, or None if *source* has no new text."""
+    for old_key, new_key in _EDIT_PAIRS:
+        new = source.get(new_key)
+        if isinstance(new, str):
+            old = source.get(old_key)
+            return _added_lines(old if isinstance(old, str) else "", new)
+    replacement = source.get("replacement")
+    if isinstance(replacement, str):
+        return len(replacement.splitlines())
+    return None
+
+
+def _content_lines(source: Mapping[str, Any]) -> int | None:
+    """Return the lines a write's recorded content adds, or None if none is recorded."""
+    edits = source.get("edits")
+    if isinstance(edits, list):
+        counts = [
+            _pair_lines(item) for item in edits if isinstance(item, Mapping)
+        ]
+        known = [count for count in counts if count is not None]
+        if known:
+            return sum(known)
+    lines = _pair_lines(source)
+    if lines is not None:
+        replacements = source.get("expected_replacements")
+        if isinstance(replacements, int) and not isinstance(replacements, bool) and replacements > 1:
+            lines *= replacements
+        return lines
+    for key in _FULL_CONTENT_KEYS:
+        value = source.get(key)
+        if isinstance(value, str):
+            return len(value.splitlines())
+    for key in _DIFF_KEYS:
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            return _diff_added_lines(value)
+    return None
+
+
+def _write_line_counts(event: TraceEvent) -> list[tuple[str, int]]:
+    """Return (path, agent-written lines) for each file one write event changes.
+
+    The path is "" when the event names no file. Every write counts at least
+    one line, so a write whose content was not recorded still shows. Deleted
+    files count no lines and are left out.
+    """
+    if event.event_type == EventType.FILE_WRITE:
+        path = _path_from_event(event)
+        return [(path, max(1, _content_lines(event.data) or 0))]
+    name = _tool_name(event)
+    args, raw = _write_arguments(event)
+    patch = _patch_text(args, raw)
+    if patch is not None:
+        sections = _patch_sections(patch)
+        return [(path, max(1, added)) for path, added, deleted in sections if not deleted]
+    path = _event_path_value(args, PATH_KEYS)
+    if name in _DELETE_TOOLS or args.get("edit_mode") == "delete":
+        return []
+    return [(path, max(1, _content_lines(args) or 0))]
+
+
+def _failed_call_indexes(events: list[TraceEvent]) -> set[int]:
+    """Return the indexes of tool calls whose linked result records a failure."""
+    pairing = pair_tool_events(events)
+    failed: set[int] = set()
+    for response_index, call_index in pairing.pairs.items():
+        response = events[response_index]
+        data = response.data if isinstance(response.data, Mapping) else {}
+        if (
+            response.event_type == EventType.ERROR
+            or data.get("is_error") is True
+            or data.get("success") is False
+        ):
+            failed.add(call_index)
+    return failed
 
 
 # modified_file_lines reads the data of every event of these types.
@@ -451,15 +657,15 @@ def modified_file_lines(events: list[TraceEvent]) -> dict[str, int]:
 def _modified_file_coverage(events: list[TraceEvent]) -> tuple[dict[str, int], int]:
     files: dict[str, int] = {}
     unknown_authorship_lines = 0
-    for event in events:
-        if not _is_write_event(event):
+    failed = _failed_call_indexes(events)
+    for index, event in enumerate(events):
+        if not _is_write_event(event) or index in failed:
             continue
-        lines = _event_line_count(event)
-        path = _path_from_event(event)
-        if not path:
-            unknown_authorship_lines += lines
-            continue
-        files[path] = files.get(path, 0) + lines
+        for path, lines in _write_line_counts(event):
+            if not path:
+                unknown_authorship_lines += lines
+                continue
+            files[path] = files.get(path, 0) + lines
     return files, unknown_authorship_lines
 
 
@@ -467,7 +673,26 @@ def _git_available(cwd: str) -> bool:
     return bool(_git(cwd, "rev-parse", "--is-inside-work-tree"))
 
 
-def _review_log(cwd: str, path: str, since_ts: float) -> str:
+def _review_rev(cwd: str, branch: str) -> str | None:
+    """Return the commit whose history holds the session's work.
+
+    That is the session branch, then its ``origin`` copy, then HEAD. None
+    means the repository has no commits.
+    """
+    refs = []
+    if branch and branch not in ("HEAD", "(unknown)"):
+        refs.extend((f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"))
+    refs.append("HEAD")
+    for ref in refs:
+        sha = _git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        if sha:
+            return sha
+    return None
+
+
+def _review_log(cwd: str, path: str, since_ts: float, rev: str | None = "HEAD") -> str:
+    if rev is None:
+        return ""
     since = f"@{int(since_ts)}"
     try:
         result = subprocess.run(
@@ -476,9 +701,9 @@ def _review_log(cwd: str, path: str, since_ts: float) -> str:
                 "-C",
                 cwd,
                 "log",
-                "--all",
+                rev,
                 f"--since={since}",
-                "--format=%H%x00%ae%x00%s%x00%b%x1e",
+                "--format=%H%x00%ae%x00%an%x00%s%x00%b%x1e",
                 "--",
                 path,
             ],
@@ -493,47 +718,68 @@ def _review_log(cwd: str, path: str, since_ts: float) -> str:
     return result.stdout.strip()
 
 
+# Share of a file's agent-written lines that local git evidence counts as reviewed.
+LOCAL_REVIEW_WEIGHTS = {
+    "not_committed": 0.0,
+    "committed_after_session": 0.0,
+    "reviewed_by_trailer": 0.75,
+}
+_REVIEWED_BY = re.compile(r"^[ \t]*reviewed-by:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_TRAILER_EMAIL = re.compile(r"<([^<>]*)>")
+# A Reviewed-by trailer naming one of these is a bot or coding agent, not a person.
+_AUTOMATED_REVIEWER_MARKERS = (
+    "[bot]",
+    "copilot",
+    "claude",
+    "anthropic",
+    "openai",
+    "codex",
+    "cursor",
+    "gemini",
+    "devin",
+)
+
+
+def _names_other_person(reviewer: str, author_email: str, author_name: str) -> bool:
+    """Return True if a Reviewed-by value names a person other than the commit author."""
+    value = reviewer.strip().lower()
+    if not value or any(marker in value for marker in _AUTOMATED_REVIEWER_MARKERS):
+        return False
+    email = _TRAILER_EMAIL.search(value)
+    if email:
+        address = email.group(1).strip()
+        return bool(address) and address != author_email.strip().lower()
+    return value != author_name.strip().lower()
+
+
 def _review_for_file(
     cwd: str,
     path: str,
     since_ts: float,
     agent_lines: int,
+    rev: str | None = "HEAD",
 ) -> tuple[int, list[str], bool]:
     if not _git_available(cwd):
         return 0, ["git_unavailable"], False
 
-    raw = _review_log(cwd, path, since_ts)
+    raw = _review_log(cwd, path, since_ts, rev)
     if not raw:
         return 0, ["not_committed"], True
 
     signals: set[str] = {"committed_after_session"}
-    authors: set[str] = set()
-    factor = 0.15
     for record in raw.split("\x1e"):
         if not record.strip():
             continue
-        parts = record.strip().split("\x00", 3)
-        if len(parts) != 4 or not parts[0] or not parts[1]:
+        parts = record.strip().split("\x00", 4)
+        if len(parts) != 5 or not parts[0] or not parts[1]:
             raise CognitiveDebtInputError("local review history was malformed")
-        _, author, subject, body = parts
-        authors.add(author)
-        text = f"{subject}\n{body}".lower()
-        if "merge pull request" in text or "pull request" in text or re.search(r"\(#\d+\)", subject):
-            signals.add("pull_request_merge")
-            factor = max(factor, 0.35)
-        if "co-authored-by:" in text:
-            signals.add("multiple_authors")
-            factor = max(factor, 0.45)
-        if "reviewed-by:" in text:
+        _, author_email, author_name, _subject, body = parts
+        if any(
+            _names_other_person(match.group(1), author_email, author_name)
+            for match in _REVIEWED_BY.finditer(body)
+        ):
             signals.add("reviewed_by_trailer")
-            factor = max(factor, 0.75)
-        if "review" in text or "comment" in text or "line" in text:
-            signals.add("review_reference")
-            factor = max(factor, 0.55)
-    if len(authors) > 1:
-        signals.add("multiple_commit_authors")
-        factor = max(factor, 0.50)
-
+    factor = max(LOCAL_REVIEW_WEIGHTS[signal] for signal in signals)
     return min(agent_lines, int(round(agent_lines * factor))), sorted(signals), True
 
 
@@ -558,6 +804,51 @@ def _github_json(path: str, token: str) -> dict | list:
     )
     with urllib.request.urlopen(req, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+# Share of a file's agent-written lines that GitHub evidence counts as reviewed.
+GITHUB_REVIEW_WEIGHTS = {
+    "github_merged_pr": 0.0,
+    "github_reviews": 0.75,
+    "github_review_comments": 0.85,
+    "github_line_comments": 1.0,
+}
+
+
+def _github_login(item: dict) -> tuple[str, bool]:
+    """Return (login, is_bot) for the account that wrote a GitHub review or comment."""
+    user = item.get("user")
+    if not isinstance(user, dict):
+        return "", False
+    login = user.get("login")
+    login = login if isinstance(login, str) else ""
+    return login, user.get("type") == "Bot" or login.lower().endswith("[bot]")
+
+
+def _by_other_person(items: list[dict], pr_author: str) -> list[dict]:
+    """Return the reviews or comments written by a person other than the PR author."""
+    kept = []
+    for item in items:
+        login, bot = _github_login(item)
+        if not login or bot or login.lower() == pr_author.lower():
+            continue
+        kept.append(item)
+    return kept
+
+
+def _repo_relative_path(cwd: str, path: str) -> str:
+    """Return *path* relative to the top of the repository that holds *cwd*, or ""."""
+    toplevel = _git(cwd, "rev-parse", "--show-toplevel")
+    if not toplevel:
+        return ""
+    full = path if os.path.isabs(path) else os.path.join(cwd, path)
+    try:
+        rel = os.path.relpath(os.path.realpath(full), os.path.realpath(toplevel))
+    except ValueError:
+        return ""
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return ""
+    return rel.replace(os.sep, "/")
 
 
 def _github_review_for_file(
@@ -587,24 +878,25 @@ def _github_review_for_file(
         number = items[0].get("number")
         if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
             raise CognitiveDebtInputError("GitHub review search response was malformed")
+        pr_author, _ = _github_login(items[0])
 
-        factor = 0.45
         signals = {"github_merged_pr"}
         reviews = _github_json(f"/repos/{owner}/{name}/pulls/{number}/reviews?per_page=100", token)
         if not isinstance(reviews, list) or any(not isinstance(item, dict) for item in reviews):
             raise CognitiveDebtInputError("GitHub reviews response was malformed")
-        if reviews:
-            factor = max(factor, 0.75)
+        submitted = [review for review in reviews if review.get("state") != "PENDING"]
+        if _by_other_person(submitted, pr_author):
             signals.add("github_reviews")
         comments = _github_json(f"/repos/{owner}/{name}/pulls/{number}/comments?per_page=100", token)
         if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
             raise CognitiveDebtInputError("GitHub review comments response was malformed")
+        comments = _by_other_person(comments, pr_author)
         if comments:
-            factor = max(factor, 0.85)
             signals.add("github_review_comments")
-            if any(comment.get("path") == path for comment in comments):
-                factor = 1.0
+            repo_path = _repo_relative_path(cwd, path)
+            if repo_path and any(comment.get("path") == repo_path for comment in comments):
                 signals.add("github_line_comments")
+        factor = max(GITHUB_REVIEW_WEIGHTS[signal] for signal in signals)
         return min(agent_lines, int(round(agent_lines * factor))), sorted(signals)
     except CognitiveDebtInputError:
         raise
@@ -626,11 +918,13 @@ def analyze_session_debt(
     Raises NonObjectEventDataError when a file_write or tool_call event's
     data is not an object; ``name_session`` adds the session ID to that error.
     """
-    cwd = _working_dir(meta)
+    checkout = _resolve_checkout(meta)
+    cwd = checkout.cwd
     branch = _branch(meta, cwd)
-    author = _author(meta, cwd)
+    author = _author(meta, checkout.recorded_dir or cwd)
     repository = _repository(meta, cwd)
     git_ok = _git_available(cwd)
+    rev = _review_rev(cwd, branch) if git_ok else None
     try:
         events = store.load_events(meta.session_id)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -648,10 +942,16 @@ def analyze_session_debt(
     total_written = unknown_authorship_lines
     total_reviewed = 0
     for path, lines in sorted(modified_files.items()):
-        reviewed, signals, review_known = _review_for_file(
-            cwd, path, meta.started_at, lines
+        git_path = _checkout_path(checkout, path)
+        if git_path is None:
+            reviewed, signals, review_known = 0, ["not_in_checkout"], False
+        else:
+            reviewed, signals, review_known = _review_for_file(
+                cwd, git_path, meta.started_at, lines, rev=rev
+            )
+        gh_reviewed, gh_signals = _github_review_for_file(
+            cwd, branch, git_path or path, github_token, lines
         )
-        gh_reviewed, gh_signals = _github_review_for_file(cwd, branch, path, github_token, lines)
         if gh_reviewed > reviewed:
             reviewed = gh_reviewed
         if gh_reviewed > 0 or gh_signals:
