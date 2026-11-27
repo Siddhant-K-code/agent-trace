@@ -1,6 +1,6 @@
 # ADR-0016: Analytics Session IDs in Product Telemetry
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-11
 **Deciders:** Siddhant Khare
 
@@ -14,11 +14,13 @@ per-session ratios are empty. Maintainers can count installations and events,
 but not how many separate stretches of use an installation has or how many
 commands one of them involves.
 
-PostHog accepts a client-generated `$session_id` on server-side events if it
-is a UUIDv7, is consistent within a session and never reused, has an embedded
-time no later than the session's first event, and covers no event 24 hours or
-more after that time. PostHog's own clients start a new session after 30
-minutes without an event or 24 hours after the session started.
+Server-side events may carry a client-generated `$session_id`. PostHog's
+[custom session ID requirements](https://posthog.com/docs/data/sessions#custom-session-ids)
+ask for an ID that is consistent within a session, never reused, and a
+UUIDv7 whose embedded time is no later than the session's first event and
+less than 24 hours before its last. Events that do not meet them are left
+out of session aggregations. PostHog's own clients start a new session after
+30 minutes without an event or 24 hours after the session started.
 
 ADR-0013 and ADR-0015 list "trace/session IDs" among the identifiers telemetry
 must never accept. That rule protects the link between an analytics event and
@@ -28,11 +30,13 @@ a recorded trace or an agent's session.
 
 Add a random analytics `$session_id` to every product-telemetry event:
 
-- Generate a fresh UUIDv7 whose embedded time is the session's start. Use the
-  same clock reading for the rotation check and the event timestamp, so the
-  event never precedes its session.
+- Use a fresh UUIDv7 whose embedded time is the session's start. Use the
+  same clock reading, clamped to the range a UUIDv7 time can hold, for the
+  rotation check and the event timestamp, so the event never precedes its
+  session.
 - Start a new session after 30 idle minutes, 24 hours after the start, or when
-  the clock is before the start. Never reuse an ended session.
+  the last event time is not between the start and now: the clock moved back,
+  or the stored value is malformed. Never reuse an ended session.
 - In the CLI, keep the session in `telemetry.json` beside the installation ID,
   updated under the existing file lock, so CLI commands and hooks in separate
   processes share it. Create it only after the disclosure gate and only while
@@ -43,9 +47,9 @@ Add a random analytics `$session_id` to every product-telemetry event:
 - Delete the session whenever telemetry is disabled and the installation ID
   is deleted.
 - Never derive the ID from a trace session ID or an agent session ID, and
-  never accept a session ID from event properties. ADR-0013 and ADR-0015's
-  exclusion of "trace/session IDs" means these trace and agent identifiers
-  and still applies.
+  never accept a session ID from event properties. The exclusion of
+  "trace/session IDs" in ADR-0013 and ADR-0015 refers to these trace and
+  agent identifiers, and it still applies.
 - Keep the telemetry schema version unchanged: the property is additive.
 
 ## Consequences

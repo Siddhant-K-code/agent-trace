@@ -326,10 +326,11 @@ def _analytics_session_id() -> tuple[str, int | None]:
     PostHog's server SDKs send no session ID, so its session analytics
     (unique sessions, session duration) see nothing.  This keeps one random
     UUIDv7 per period of activity on this installation, shared by every CLI
-    and hook process through the config.  It meets PostHog's rules for a
-    custom session ID: it starts at or before the session's first event, and
-    rotates after 30 idle minutes or 24 hours.  It is not derived from, and
-    cannot be linked to, any trace session.
+    and hook process through the config.  It follows PostHog's requirements
+    for custom session IDs (https://posthog.com/docs/data/sessions#custom-session-ids):
+    it starts at or before the session's first event, and rotates after 30
+    idle minutes or 24 hours.  It is not derived from, and cannot be linked
+    to, any trace session.
 
     The returned time is the one the rotation used, so the event's timestamp
     stays inside the session.  Returns ("", None) when no session can be
@@ -349,18 +350,20 @@ def _analytics_session_id() -> tuple[str, int | None]:
         session_id = current.get(_SESSION_ID_KEY)
         last_ms = current.get(_SESSION_LAST_EVENT_KEY)
         start_ms = _session_start_ms(session_id)
+        # A last-event time that is not an int between the start and now is
+        # malformed or from a clock that moved back; a future one would
+        # otherwise keep the session alive until the 24-hour limit.
         if (
             start_ms is None
             or not isinstance(last_ms, int)
             or isinstance(last_ms, bool)
-            or now_ms < start_ms
+            or not start_ms <= last_ms <= now_ms
             or now_ms - start_ms >= _SESSION_MAX_MS
-            or now_ms - max(last_ms, start_ms) >= _SESSION_IDLE_MS
+            or now_ms - last_ms >= _SESSION_IDLE_MS
         ):
             session_id = _uuid7(now_ms)
-            last_ms = now_ms
         current[_SESSION_ID_KEY] = session_id
-        current[_SESSION_LAST_EVENT_KEY] = max(last_ms, now_ms)
+        current[_SESSION_LAST_EVENT_KEY] = now_ms
         result = (session_id, now_ms)
         return current
 
@@ -631,7 +634,7 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
         f"{_posthog_host() if telemetry_configured() else 'not configured'}\n"
         "Collected: command/subcommand, success, duration, integration/export format, "
         "agent-strace/Python version, OS, CI flag, a random installation ID, and a "
-        "random analytics session ID that rotates after 30 idle minutes.\n"
+        "random analytics session ID that rotates after 30 idle minutes or 24 hours.\n"
         "Never collected: prompts, responses, arguments, paths, repository data, "
         "trace contents, trace session IDs, or exception messages.\n"
     )

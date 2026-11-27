@@ -376,6 +376,31 @@ class TestAnalyticsSession(TelemetryTestCase):
         latest = self._session_at(59 + 20 * 72)
         self.assertNotIn(self._session_at(30), {first, idle, latest})
 
+    def test_malformed_last_event_time_starts_a_new_session(self):
+        telemetry.set_telemetry_enabled(True)
+        first = self._session_at(0)
+        start_ms = telemetry._session_start_ms(first)
+
+        def session_after(last_event):
+            config = json.loads(self.config_path.read_text())
+            config["analytics_session_id"] = first
+            config["analytics_session_last_event_ms"] = last_event
+            self.config_path.write_text(json.dumps(config))
+            return self._session_at(1)
+
+        self.assertEqual(session_after(start_ms), first)
+        for last_event in (
+            start_ms + 10 * 60 * 1000,
+            start_ms - 1,
+            -1,
+            True,
+            "1",
+            float(start_ms),
+            None,
+        ):
+            with self.subTest(last_event=last_event):
+                self.assertNotEqual(session_after(last_event), first)
+
     def test_disable_deletes_the_session_and_enable_keeps_it(self):
         telemetry.set_telemetry_enabled(True)
         session_id = self._session_at(0)

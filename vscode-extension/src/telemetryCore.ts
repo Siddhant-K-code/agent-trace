@@ -155,8 +155,10 @@ export function uuidv7(unixMs: number, random: Uint8Array): string {
 /**
  * Return the session an event sent at `now` belongs to.  The session goes
  * on until 30 idle minutes or 24 hours have passed, or the clock moves back
- * before its start; PostHog drops a session ID whose UUIDv7 time is later
- * than the session's first event or more than 24 hours before its last.
+ * before its last event.  PostHog's custom session ID requirements
+ * (https://posthog.com/docs/data/sessions#custom-session-ids) leave a
+ * session out of its session analytics when its UUIDv7 time is later than
+ * its first event or more than 24 hours before its last.
  */
 export function nextAnalyticsSession(
   current: AnalyticsSession | undefined,
@@ -165,11 +167,11 @@ export function nextAnalyticsSession(
 ): AnalyticsSession {
   if (
     current === undefined ||
-    now < current.startedAt ||
+    !(current.startedAt <= current.lastEventAt && current.lastEventAt <= now) ||
     now - current.startedAt >= SESSION_MAX_MS ||
-    now - Math.max(current.lastEventAt, current.startedAt) >= SESSION_IDLE_MS
+    now - current.lastEventAt >= SESSION_IDLE_MS
   ) {
     return { id: newId(now), startedAt: now, lastEventAt: now };
   }
-  return { ...current, lastEventAt: Math.max(current.lastEventAt, now) };
+  return { ...current, lastEventAt: now };
 }

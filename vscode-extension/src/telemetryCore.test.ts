@@ -98,4 +98,13 @@ test("keeps a session until 30 idle minutes or 24 hours pass", () => {
   const earlier = nextAnalyticsSession(current, start - 1, newId);
   assert.notEqual(earlier.id, current.id);
   assert.equal(earlier.startedAt, start - 1);
+
+  const later = nextAnalyticsSession(current, start + 60_000, newId);
+  assert.equal(later.id, current.id);
+  const movedBack = nextAnalyticsSession(later, start + 30_000, newId);
+  assert.notEqual(movedBack.id, current.id);
+  assert.equal(movedBack.startedAt, start + 30_000);
+
+  const future = { ...current, lastEventAt: start + 10 * 60_000 };
+  assert.notEqual(nextAnalyticsSession(future, start + 60_000, newId).id, current.id);
 });

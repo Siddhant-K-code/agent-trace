@@ -122,12 +122,14 @@ therefore adds its own random
 [`$session_id`](https://posthog.com/docs/data/sessions#server-sdks-and-sessions)
 that groups one stretch of use:
 
-- It is a fresh UUIDv7, as PostHog requires for custom session IDs. Its
-  embedded time is the session's start, which is never later than the
-  session's first event.
+- agent-strace uses a fresh UUIDv7 and follows PostHog's
+  [custom session ID requirements](https://posthog.com/docs/data/sessions#custom-session-ids).
+  The UUIDv7's embedded time is the session's start, which is never later
+  than the session's first event.
 - A new session starts after 30 minutes without an event, or 24 hours after
-  the session started, PostHog's own session rules. A session is never reused
-  after it ends.
+  the session started, matching how PostHog defines a session. A new session
+  also starts if the clock moves back before the last event or the stored
+  session is malformed. A session is never reused after it ends.
 - The CLI keeps the current session in `~/.agent-strace/telemetry.json`
   (`analytics_session_id` and `analytics_session_last_event_ms`), so CLI
   commands and agent hooks running in separate processes share it.
