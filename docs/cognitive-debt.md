@@ -45,6 +45,8 @@ The JSON report has `schema_version: 1`. Its root `coverage` object includes:
 
 `workflows` contains per-session detail. `groups` contains repository or branch aggregates. Neither contains author rankings. The `interpretation` object records that this is review coverage, not code quality or causal evidence.
 
+[Agent-written lines](cognitive-debt-review-coverage.md#agent-written-lines) lists the write tools and argument shapes counted for each agent. [Review evidence](cognitive-debt-review-coverage.md#review-evidence) lists every review signal and its weight. Commits, merged pull requests, co-author trailers and words in commit messages are not review evidence.
+
 Malformed trace data, malformed write-tool arguments, malformed local review records, and malformed GitHub review responses fail closed. The command writes no report or badge when input validation fails.
 
 ## Shields badge
@@ -98,3 +100,5 @@ gh release upload "$GITHUB_REF_NAME" \
 ```
 
 For an always-current badge, publish the badge JSON to a stable branch path. For release evidence, keep both JSON files as release assets. A later PR Evidence Check can read `artifacts/cognitive-debt.json`, require `schema_version == 1`, and treat `status == "unknown"` as unavailable evidence rather than a passing result.
+
+A CI job runs in a different directory from the one the session recorded. The command then reads the current checkout's git history when its remote names the session's repository and the session started at the repository root; see [Reading a trace from another checkout](cognitive-debt-review-coverage.md#reading-a-trace-from-another-checkout). Check out with `fetch-depth: 0` so the branch history is available.

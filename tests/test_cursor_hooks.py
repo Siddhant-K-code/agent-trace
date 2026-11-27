@@ -137,6 +137,21 @@ class TestCursorHooks(unittest.TestCase):
         self.assertEqual(writes[0].data["path"], "src/parser.py")
         self.assertIn("Refactor", responses[0].data["text"])
 
+    def test_cursor_file_edit_keeps_its_edits(self):
+        handle_session_start({"session_id": "cursoredits12345", "source": "startup"}, provider="cursor")
+        session_id = _read_active_session(provider="cursor")
+        edits = [{"old_string": "a", "new_string": "a\nb"}]
+
+        handle_file_write({
+            "session_id": "cursoredits12345",
+            "file_path": "src/parser.py",
+            "edits": edits,
+        }, provider="cursor")
+
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        writes = [event for event in events if event.event_type == EventType.FILE_WRITE]
+        self.assertEqual(writes[0].data["edits"], edits)
+
     def test_hook_main_accepts_cursor_aliases(self):
         conversation_id = "cursoralias123456789"
         start_payload = json.dumps({

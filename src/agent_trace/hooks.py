@@ -1296,6 +1296,9 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     for key in ("diff", "patch", "change_summary", "turn_id", "permission_mode"):
         if input_data.get(key) not in (None, ""):
             data[key] = input_data.get(key)
+    # Cursor's afterFileEdit sends the change as a list of old/new string pairs.
+    if isinstance(input_data.get("edits"), list):
+        data["edits"] = input_data["edits"]
     if redact:
         data = redact_data(data)
 

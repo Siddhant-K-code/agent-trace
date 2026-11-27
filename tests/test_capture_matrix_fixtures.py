@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.cli import _claude_hooks_config, _codex_hooks_config, _copilot_hooks_config
+from agent_trace.cognitive_debt import modified_file_lines
 from agent_trace.failures import count_session_errors
 from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
@@ -173,6 +174,12 @@ class _ReplayChecks:
     def sessions(self, store):
         return {meta.session_id: meta for meta in store.list_sessions()}
 
+    def written_lines(self, scenario):
+        """Return cognitive-debt's agent-written lines per file for *scenario*."""
+        store, _ = self.replay(scenario)
+        events = [event for session_id in self.sessions(store) for event in store.load_events(session_id)]
+        return modified_file_lines(events)
+
     def health(self, store, session_id):
         return assess_session(
             store,
@@ -283,6 +290,9 @@ class _CopilotChecks(_ReplayChecks):
 class TestCopilotFixture(_CopilotChecks, unittest.TestCase):
     """Copilot CLI 1.0.107: tool hooks carry toolCallId, so results pair by
     call ID. The rest of the hook shape matches 1.0.103-0."""
+
+    def test_cognitive_debt_counts_the_edit_tool_line(self):
+        self.assertEqual(self.written_lines("tool"), {"/workspace/project/notes.txt": 1})
 
     def hook_payloads(self, scenario, event):
         return [
@@ -1097,6 +1107,9 @@ class TestClaudeFixture(_ReplayChecks, unittest.TestCase):
 
     provider = "claude"
     agent_id_pattern = SYNTHETIC_CLAUDE_AGENT_ID
+
+    def test_cognitive_debt_counts_the_edit_tool_line(self):
+        self.assertEqual(self.written_lines("tool"), {"/workspace/project/notes.txt": 1})
 
     def only_session(self, store):
         (meta,) = self.sessions(store).values()
