@@ -3170,8 +3170,8 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_sub = p_baseline.add_subparsers(dest="baseline_cmd")
 
     p_bl_update = baseline_sub.add_parser("update", help="build baseline from recent sessions")
-    p_bl_update.add_argument("--since", type=float, default=30.0, dest="since_days",
-                             metavar="DAYS", help="sessions from the last N days (default: 30)")
+    p_bl_update.add_argument("--since", default="30d", dest="since_days", metavar="Nd",
+                             help="sessions from the last N days, as N or Nd (default: 30d)")
     p_bl_update.add_argument("--output", default=".agent-traces/baseline.json",
                              help="output path (default: .agent-traces/baseline.json)")
 
