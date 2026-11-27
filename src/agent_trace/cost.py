@@ -54,8 +54,9 @@ inference profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model.
 Updating this table requires checking each URL in ``PRICING_SOURCES``,
 updating ``PRICING`` (``_MODEL_PROVIDERS`` is derived from its keys),
 advancing the snapshot date, and extending the provider-cost tests for every
-added model family.  Each new Claude key also needs its context window in
-``CONTEXT_LIMITS`` in token_budget.py.
+added model family.  Each new key, other than a short name, also needs its
+own entry in ``CONTEXT_LIMITS`` in token_budget.py.  The comment at the top of
+that table says which figure to use.
 """
 
 PRICING_SOURCES: dict[str, str] = {

@@ -651,9 +651,14 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(context_fill_ratio(event), 0.8)
 
     def test_context_fill_ratio_finds_the_limit_by_the_cost_name_rule(self):
-        # openai/gpt-4o has 128,000 tokens. gpt-4.1 has no known limit, so it
-        # gets the 200,000 default, not the 8,192 of gpt-4.
-        cases = {"openai/gpt-4o": 0.5, "gpt-4.1-2025-04-14": 0.32}
+        # openai/gpt-4o has 128,000 tokens and gpt-5 has 272,000.
+        # gpt-4.5-preview has no known limit, so it gets the 200,000 default,
+        # not the 8,192 of gpt-4.
+        cases = {
+            "openai/gpt-4o": 0.5,
+            "gpt-5-2025-08-07": 64_000 / 272_000,
+            "gpt-4.5-preview-2025-02-27": 0.32,
+        }
         for model, ratio in cases.items():
             with self.subTest(model=model):
                 event = _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=64_000)

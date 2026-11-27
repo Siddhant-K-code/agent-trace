@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.cost import PRICING
+from agent_trace.cost import PRICING, _SHORT_MODEL_NAMES
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.token_budget import (
@@ -136,7 +136,8 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
 
     def test_name_with_no_key_of_its_own_gets_no_limit(self):
         for model in (
-            "gpt-4.1", "gpt-4.1-2025-04-14", "claude", "claude-3", "claude-opus-47",
+            "gpt-4.5-preview", "gpt-4.5-preview-2025-02-27",
+            "claude", "claude-3", "claude-opus-47",
             "claude-haiku-3-5", "claude-haiku-3",
             "gpt", "o", "gemini",
             "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
@@ -162,7 +163,6 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
             "gpt-4o-mini-2024-07-18": 128_000,
             "gpt-4-0613": 8_192,
             "o3-mini": 200_000,
-            "o1-preview": 200_000,
             "gemini-2.0-flash-lite": 1_048_576,
             "llama-3.1-70b-instruct": 131_072,
             "claude-opus-4-5-20251101": 200_000,
@@ -210,11 +210,83 @@ class TestClaudeContextWindows(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(_resolve_limit(model), limit)
 
-    def test_every_priced_claude_model_has_a_window(self):
-        # A Claude model added to PRICING needs its window too. Without one,
-        # token-budget prints unknown and watch gives no alert for it.
+
+class TestModelPageLimits(unittest.TestCase):
+    """Each limit is the most input tokens one request can carry, from the
+    model's page: its maximum input when the page states one no larger than
+    the context window, and the context window otherwise."""
+
+    def test_each_model_id_gets_the_limit_of_its_model(self):
+        # Before, gemini-1.5-pro had 1,048,576, o1-preview had the 200,000 of
+        # o1, and the others had no known limit.
+        cases = {
+            "gpt-6.1-sol": 922_000,
+            "gpt-5.5-pro": 1_050_000,
+            "gpt-5.4-mini": 272_000,
+            "gpt-5.3-codex": 272_000,
+            "gpt-5.2": 400_000,
+            "gpt-5.1-codex-max": 400_000,
+            "gpt-5-2025-08-07": 272_000,
+            "openai/gpt-5": 272_000,
+            "gpt-5-codex": 272_000,
+            "gpt-5-pro-2025-10-06": 400_000,
+            "gpt-4.1-2025-04-14": 1_047_576,
+            "gpt-4.1-nano": 1_047_576,
+            "o4-mini-2025-04-16": 200_000,
+            "o1-preview-2024-09-12": 128_000,
+            "gemini-4-carbon": 1_048_576,
+            "gemini-3.8-flash": 1_048_576,
+            "gemini-3.1-pro-preview-customtools": 1_048_576,
+            "gemini-2.5-pro": 1_048_576,
+            "gemini-1.5-pro-002": 2_097_152,
+            "amazon.nova-pro-v1:0": 300_000,
+            "us.amazon.nova-lite-v1:0": 300_000,
+            "bedrock/amazon.nova-micro-v1:0": 128_000,
+        }
+        for model, limit in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), limit)
+
+    def test_a_variant_gets_its_own_limit_not_that_of_its_model(self):
+        # Each name starts with the key of a model with another limit, such
+        # as gpt-5, gpt-4 or gemini-2.5-flash. A chat-latest page states a
+        # maximum input of 272,000 in a 128,000 window. gpt-5-search-api is
+        # from the web search guide. gpt-4o-mini-tts is from the text of its
+        # page.
+        cases = {
+            "gpt-5.2-chat-latest": 128_000,
+            "gpt-5.1-chat-latest": 128_000,
+            "gpt-5-chat-latest": 128_000,
+            "gpt-5.2-codex": 272_000,
+            "gpt-5-search-api": 200_000,
+            "gpt-5-search-api-2025-10-14": 200_000,
+            "gpt-4-0125-preview": 128_000,
+            "gpt-4-1106-vision-preview": 128_000,
+            "gpt-4o-realtime-preview-2024-12-17": 32_000,
+            "gpt-4o-mini-realtime-preview": 16_000,
+            "gpt-4o-transcribe-diarize": 16_000,
+            "gpt-4o-mini-transcribe-2025-12-15": 16_000,
+            "gpt-4o-mini-tts-2025-03-20": 2_000,
+            "gemini-3.8-flash-tts": 8_192,
+            "gemini-3.8-flash-lite-tts": 8_192,
+            "gemini-3.1-flash-lite-image": 65_536,
+            "gemini-2.5-pro-preview-tts": 8_192,
+            "gemini-2.5-flash-preview-tts": 8_192,
+            "gemini-2.5-flash-image-preview": 65_536,
+            "gemini-2.5-flash-native-audio-preview-12-2025": 131_072,
+        }
+        for model, limit in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), limit)
+
+    def test_every_priced_model_has_a_limit_of_its_own(self):
+        # A model added to PRICING needs its own limit too. Without one,
+        # token-budget prints unknown for it, or uses the limit of a shorter
+        # key that its name starts with. cost --input-price adds a "custom"
+        # key to PRICING and leaves it there, so an earlier test in the same
+        # run, such as one in test_cost, can leave it behind.
         for key in PRICING:
-            if key.startswith("claude-"):
+            if key not in _SHORT_MODEL_NAMES and key != "custom":
                 with self.subTest(model=key):
                     self.assertIn(key, CONTEXT_LIMITS)
 
@@ -274,8 +346,21 @@ class TestReportLimitByCostNameRule(unittest.TestCase):
                 self.assertIn("Context limit: 200,000 tokens", result.stdout)
                 self.assertIn("Current: 150,000 tokens  (75.0% of limit)", result.stdout)
 
+    def test_session_of_an_openai_or_gemini_model_gets_its_limit(self):
+        # Before, gpt-5 had no known limit and gemini-1.5-pro had 1,048,576.
+        cases = {
+            "gpt-5-2025-08-07": ("272,000", "55.1%", "Headroom: 122,000 tokens"),
+            "gemini-1.5-pro-002": ("2,097,152", "7.2%", "Headroom: 1,947,152 tokens"),
+        }
+        for model, (shown, pct, headroom) in cases.items():
+            with self.subTest(model=model):
+                _report, text = self._report(model)
+                self.assertIn(f"Context limit: {shown} tokens", text)
+                self.assertIn(f"Current: 150,000 tokens  ({pct} of limit)", text)
+                self.assertIn(headroom, text)
+
     def test_session_with_no_known_limit_prints_unknown(self):
-        report, text = self._report("gpt-4.1-2025-04-14")
+        report, text = self._report("gpt-4.5-preview-2025-02-27")
         self.assertIsNone(report.context_limit)
         self.assertEqual([r.pct_used for r in report.requests], [None, None])
         self.assertIn("Context limit: unknown tokens", text)
@@ -436,10 +521,20 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_no_fire_for_a_model_with_no_known_limit(self):
-        # gpt-4.1 has no limit in the table. gpt-4's 8,192 is not its limit.
+        # gpt-4.5-preview has no limit in the table. gpt-4's 8,192 is not
+        # its limit.
         watcher = TokenBudgetWatcher(threshold=0.9)
-        self.assertIsNone(watcher.update(_request(10_000, "gpt-4.1-2025-04-14")))
+        model = "gpt-4.5-preview-2025-02-27"
+        self.assertIsNone(watcher.update(_request(10_000, model)))
         self.assertIsNone(watcher.context_limit)
+
+    def test_fires_for_a_gpt_5_model_at_90_percent_of_its_maximum_input(self):
+        # gpt-5 takes at most 272,000 input tokens in its 400,000 window.
+        watcher = TokenBudgetWatcher(threshold=0.9)
+        self.assertIsNone(watcher.update(_request(240_000, "gpt-5-2025-08-07")))
+        result = watcher.update(_request(250_000, "gpt-5-2025-08-07"))
+        self.assertIsNotNone(result)
+        self.assertIn("250,000 / 272,000 tokens (91.9%)", result)
 
     def test_fires_for_a_bedrock_inference_profile(self):
         for geography in ("us", "ca", "in"):
