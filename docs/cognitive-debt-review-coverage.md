@@ -80,7 +80,10 @@ or a scratch file in `/tmp`, is not counted. A file inside another git
 repository is counted with review state unknown (`outside_repository`). Both
 checks need the recorded directory. From another checkout, every file outside
 the recorded directory reads `not_in_checkout`, so a session that wrote a plan
-file there reads `unknown`.
+file there reads `unknown`. Local `file://` URIs are URL-decoded and converted
+to platform paths before these checks and before git runs. Other URI schemes,
+file URIs with a non-local host, query or fragment, and paths that cannot be
+converted are `not_in_checkout` and remain unknown.
 
 ## Review evidence
 
@@ -88,18 +91,22 @@ Each file gets the weight of its strongest signal. Its reviewed lines are its
 agent-written lines times that weight, rounded. When both local git and GitHub
 have evidence, the larger count is used.
 
-Local git reads `git log --since=<session start> -- <file>` on the session's
-branch: `refs/heads/<branch>`, then `refs/remotes/origin/<branch>`, then
-`HEAD`. Commits on other branches are not read.
+Local git reads commits after that file's latest recorded agent write on the
+session's branch: `refs/heads/<branch>`, then
+`refs/remotes/origin/<branch>`. Commits on other branches are not read. When
+the recorded branch is known but neither ref exists, review state is unknown;
+git does not fall back to an unrelated `HEAD`. `HEAD` is used only when the
+session has no known branch.
 
 | Local signal | Weight | Meaning |
 |---|---|---|
-| `not_committed` | 0 | No commit on the branch touched the file after the session started |
-| `committed_after_session` | 0 | A commit touched the file. Committing is not review |
+| `not_committed` | 0 | No commit on the branch touched the file after its latest agent write |
+| `committed_after_session` | 0 | A later commit touched the file. Committing is not review |
 | `reviewed_by_trailer` | 0.75 | A commit body has a `Reviewed-by:` line naming another person |
 | `git_unavailable` | unknown | The directory is not a git work tree |
+| `git_revision_unavailable` | unknown | The known recorded branch has no local or `origin` ref |
 | `outside_repository` | unknown | The file is inside another git repository |
-| `not_in_checkout` | unknown | The file is not in the checkout read instead of the recorded directory |
+| `not_in_checkout` | unknown | The file is not in the checkout read instead of the recorded directory, or its URI cannot name a local path |
 
 A `Reviewed-by:` value does not count when it has the commit author's email,
 with or without angle brackets, or, without an email, the author's name. It also does not count when it
@@ -108,8 +115,14 @@ contains `[bot]`, `copilot`, `claude`, `anthropic`, `openai`, `codex`,
 `Co-authored-by:` trailers, several commit authors, "pull request" and `(#N)`
 in a message are not review evidence.
 
-With `--github-token`, the first merged pull request whose head is the
-session's branch is read:
+With `--github-token`, the command searches merged pull requests whose head is
+the session's branch. A pull request is usable only when both its base and head
+repository match the recorded repository, its head branch matches, it merged
+after the file's latest agent write, and that file is present in its
+changed-file list. Exactly one candidate must match. No GitHub evidence is
+applied when branch reuse leaves several candidates, when no candidate
+contains the file, or when search or changed-file pagination prevents a
+complete decision.
 
 | GitHub signal | Weight | Meaning |
 |---|---|---|
@@ -120,8 +133,12 @@ session's branch is read:
 
 Reviews and comments by the pull request author, by bots (`type: Bot` or a
 login ending in `[bot]`) and pending reviews do not count. Open pull requests
-are not read. A GitHub signal makes the file's review state known, so a merged
-pull request with no other person's review counts as unreviewed.
+are not read. Reviews and comments must also be later than the file's latest
+agent write. Malformed or incomplete GitHub responses fail closed with unknown
+review state and zero GitHub evidence. A valid GitHub signal makes the file's
+review state known, so a matching merged pull request with no later review by
+another person counts as unreviewed. GitHub is not queried for files outside
+the repository or absent from the checkout.
 
 ## Reading a trace from another checkout
 

@@ -60,11 +60,12 @@ def _make_store_session(
     return meta
 
 
-def _append_write(store, meta, path, lines):
+def _append_write(store, meta, path, lines, *, timestamp=None):
     store.append_event(
         meta.session_id,
         TraceEvent(
             event_type=EventType.FILE_WRITE,
+            timestamp=timestamp if timestamp is not None else time.time(),
             data={"path": path, "content": "\n".join(str(index) for index in range(lines))},
         ),
     )
@@ -302,12 +303,12 @@ class TestCognitiveDebtScoring(unittest.TestCase):
 
     def test_malformed_review_history_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "repo"
-            repo.mkdir()
-            _git(str(repo), "init")
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app")
+            write_at = _commit_timestamp(repo) - 1
             store = TraceStore(Path(tmp) / "traces")
-            meta = _make_store_session(store, str(repo))
-            _append_write(store, meta, "app.py", 2)
+            meta = _make_store_session(store, repo, started_at=write_at - 60)
+            _append_write(store, meta, "app.py", 2, timestamp=write_at)
 
             with patch(
                 "agent_trace.cognitive_debt._review_log",
@@ -319,7 +320,7 @@ class TestCognitiveDebtScoring(unittest.TestCase):
                 ):
                     build_cognitive_debt_report(
                         store,
-                        window_start=time.time() - 60,
+                        window_start=write_at - 120,
                         window_end=time.time() + 60,
                     )
 
@@ -580,6 +581,31 @@ class TestAgentWrittenLines(unittest.TestCase):
 
         self.assertEqual(modified_file_lines(events), {"omitted.py": 1, "cursor.py": 1})
 
+    def test_latest_write_time_is_tracked_without_changing_line_totals(self):
+        events = [
+            TraceEvent(
+                event_type=EventType.FILE_WRITE,
+                timestamp=10,
+                data={"path": "app.py", "content": "a\nb"},
+            ),
+            TraceEvent(
+                event_type=EventType.FILE_WRITE,
+                timestamp=20,
+                data={"path": "app.py", "content": "c\nd\ne"},
+            ),
+            TraceEvent(
+                event_type=EventType.FILE_WRITE,
+                timestamp=30,
+                data={"content": "unknown\npath"},
+            ),
+        ]
+
+        files, unknown = cognitive_debt._modified_file_stats(events)
+
+        self.assertEqual(files["app.py"].lines, 5)
+        self.assertEqual(files["app.py"].latest_write_at, 20)
+        self.assertEqual(unknown, 2)
+
     def test_malformed_write_arguments_fail_closed(self):
         for event, message in (
             (_call("Write", ["a.py"]), "write tool arguments must be an object"),
@@ -600,6 +626,16 @@ def _commit(repo, path, message, author="Dev <dev@example.com>"):
     _git(repo, "commit", "-q", "--author", author, "-m", message)
 
 
+def _commit_timestamp(repo):
+    result = subprocess.run(
+        ["git", "-C", repo, "show", "-s", "--format=%ct", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
+
+
 def _init_repo(path, remote=""):
     path.mkdir(parents=True)
     _git(str(path), "init", "-q", "-b", "main")
@@ -615,15 +651,16 @@ class TestLocalReviewSignals(unittest.TestCase):
     """Only a Reviewed-by trailer naming another person, on the session's
     branch, counts as local review evidence."""
 
-    def review(self, repo):
+    def review(self, repo, *, write_at=None):
         """Return (reviewed lines, review signals, review state) for app.py."""
+        write_at = write_at if write_at is not None else time.time() - 7200
         with tempfile.TemporaryDirectory() as traces:
             store = TraceStore(Path(traces))
-            meta = _make_store_session(store, repo, started_at=time.time() - 3600)
-            _append_write(store, meta, "app.py", 20)
+            meta = _make_store_session(store, repo, started_at=write_at - 60)
+            _append_write(store, meta, "app.py", 20, timestamp=write_at)
             report = build_cognitive_debt_report(
                 store,
-                window_start=time.time() - 7200,
+                window_start=write_at - 120,
                 window_end=time.time() + 60,
             )
         (file_debt,) = report.sessions[0].files
@@ -669,6 +706,26 @@ class TestLocalReviewSignals(unittest.TestCase):
                 self.review(repo), (15, ["committed_after_session", "reviewed_by_trailer"], "known")
             )
 
+    def test_review_before_latest_write_does_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+
+            self.assertEqual(
+                self.review(repo, write_at=_commit_timestamp(repo) + 1),
+                (0, ["not_committed"], "known"),
+            )
+
+    def test_review_after_latest_write_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+
+            self.assertEqual(
+                self.review(repo, write_at=_commit_timestamp(repo) - 1),
+                (15, ["committed_after_session", "reviewed_by_trailer"], "known"),
+            )
+
     def test_repository_without_commits_is_not_committed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_repo(Path(tmp) / "repo")
@@ -681,62 +738,366 @@ class TestLocalReviewSignals(unittest.TestCase):
             _commit(repo, "app.py", "Add app")
             other = _init_repo(Path(tmp) / "other")
             store = TraceStore(Path(tmp) / "traces")
-            meta = _make_store_session(store, repo, started_at=time.time() - 3600)
-            _append_write(store, meta, "app.py", 20)
-            _append_write(store, meta, str(Path(tmp) / "plans" / "plan.md"), 7)
-            _append_write(store, meta, "../scratch.txt", 3)
-            _append_write(store, meta, str(Path(other) / "lib.py"), 5)
-            report = build_cognitive_debt_report(
+            write_at = time.time() - 3600
+            meta = _make_store_session(store, repo, started_at=write_at - 60)
+            _append_write(store, meta, "app.py", 20, timestamp=write_at)
+            _append_write(
                 store,
-                window_start=time.time() - 7200,
-                window_end=time.time() + 60,
+                meta,
+                str(Path(tmp) / "plans" / "plan.md"),
+                7,
+                timestamp=write_at,
             )
+            _append_write(store, meta, "../scratch.txt", 3, timestamp=write_at)
+            _append_write(
+                store,
+                meta,
+                str(Path(other) / "lib.py"),
+                5,
+                timestamp=write_at,
+            )
+            with patch(
+                "agent_trace.cognitive_debt._github_review_for_file",
+                return_value=(0, []),
+            ) as github_review:
+                report = build_cognitive_debt_report(
+                    store,
+                    window_start=write_at - 120,
+                    window_end=time.time() + 60,
+                )
 
         files = {Path(item.path).name: item for item in report.sessions[0].files}
+        self.assertEqual(github_review.call_count, 1)
+        self.assertEqual(github_review.call_args.args[2], "app.py")
         self.assertEqual(sorted(files), ["app.py", "lib.py"])
         self.assertEqual(files["lib.py"].review_signals, ["outside_repository"])
         self.assertEqual(files["lib.py"].review_state, "unknown")
         self.assertEqual(report.total_unreviewed_lines, 20)
         self.assertEqual(report.total_unknown_review_lines, 5)
 
+    def test_missing_recorded_branch_does_not_fall_back_to_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+            write_at = _commit_timestamp(repo) - 1
+            store = TraceStore(Path(tmp) / "traces")
+            meta = _make_store_session(
+                store,
+                repo,
+                branch="deleted-branch",
+                started_at=write_at - 60,
+            )
+            _append_write(store, meta, "app.py", 20, timestamp=write_at)
+
+            report = build_cognitive_debt_report(
+                store,
+                window_start=write_at - 120,
+                window_end=time.time() + 60,
+            )
+
+        (file_debt,) = report.sessions[0].files
+        self.assertEqual(file_debt.human_reviewed_lines, 0)
+        self.assertEqual(file_debt.review_signals, ["git_revision_unavailable"])
+        self.assertEqual(file_debt.review_state, "unknown")
+
+
+class TestReviewPaths(unittest.TestCase):
+    def test_file_write_and_tool_call_file_uris_are_reviewed_as_local_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            write_at = time.time() - 3600
+            store = TraceStore(Path(tmp) / "traces")
+            meta = _make_store_session(store, repo, started_at=write_at - 60)
+            file_path = Path(repo) / "src" / "file name.py"
+            tool_path = Path(repo) / "src" / "tool name.py"
+            _append_write(
+                store,
+                meta,
+                file_path.as_uri(),
+                4,
+                timestamp=write_at,
+            )
+            store.append_event(
+                meta.session_id,
+                TraceEvent(
+                    event_type=EventType.TOOL_CALL,
+                    timestamp=write_at + 1,
+                    data={
+                        "tool_name": "Write",
+                        "arguments": {
+                            "file_path": tool_path.as_uri(),
+                            "content": "a\nb\nc\n",
+                        },
+                    },
+                ),
+            )
+            _commit(
+                repo,
+                "src/file name.py",
+                "Add file\n\nReviewed-by: Jane Reviewer <jane@example.com>",
+            )
+            _commit(
+                repo,
+                "src/tool name.py",
+                "Add tool file\n\nReviewed-by: Jane Reviewer <jane@example.com>",
+            )
+
+            report = build_cognitive_debt_report(
+                store,
+                window_start=write_at - 120,
+                window_end=time.time() + 60,
+            )
+
+        files = {item.path: item for item in report.sessions[0].files}
+        self.assertEqual(files[file_path.as_uri()].human_reviewed_lines, 3)
+        self.assertEqual(files[tool_path.as_uri()].human_reviewed_lines, 2)
+        self.assertIn("reviewed_by_trailer", files[file_path.as_uri()].review_signals)
+        self.assertIn("reviewed_by_trailer", files[tool_path.as_uri()].review_signals)
+
+    def test_unsupported_uri_scheme_stays_unknown_without_github_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app")
+            store = TraceStore(Path(tmp) / "traces")
+            meta = _make_store_session(store, repo)
+            _append_write(store, meta, "https://example.com/app.py", 4)
+
+            with patch(
+                "agent_trace.cognitive_debt._github_review_for_file",
+                return_value=(4, ["github_line_comments"]),
+            ) as github_review:
+                report = build_cognitive_debt_report(
+                    store,
+                    window_start=time.time() - 60,
+                    window_end=time.time() + 60,
+                    github_token="token",
+                )
+
+        github_review.assert_not_called()
+        (file_debt,) = report.sessions[0].files
+        self.assertEqual(file_debt.review_signals, ["not_in_checkout"])
+        self.assertEqual(file_debt.review_state, "unknown")
+
 
 class TestGitHubReviewSignals(unittest.TestCase):
-    def review(self, responses, cwd, path):
+    WRITE_AT = 1_700_000_000.0
+    BEFORE_WRITE = "2023-11-14T00:00:00Z"
+    AFTER_WRITE = "2023-11-15T00:00:00Z"
+
+    def search(self, *numbers):
+        return {
+            "total_count": len(numbers),
+            "incomplete_results": False,
+            "items": [{"number": number} for number in numbers],
+        }
+
+    def pr(
+        self,
+        number,
+        *,
+        merged_at=None,
+        changed_files=1,
+        head_repo="acme/widgets",
+    ):
+        return {
+            "number": number,
+            "user": {"login": "dev"},
+            "merged": True,
+            "merged_at": merged_at or self.AFTER_WRITE,
+            "closed_at": merged_at or self.AFTER_WRITE,
+            "changed_files": changed_files,
+            "head": {"ref": "feature", "repo": {"full_name": head_repo}},
+            "base": {"repo": {"full_name": "acme/widgets"}},
+        }
+
+    def review(self, responses, cwd, path, *, latest_write_at=None):
         replies = iter(responses)
         with patch("agent_trace.cognitive_debt._github_repo", return_value=("acme", "widgets")), patch(
             "agent_trace.cognitive_debt._github_json", side_effect=lambda *_args: next(replies)
         ):
-            return cognitive_debt._github_review_for_file(cwd, "feature", path, "token", 20)
+            return cognitive_debt._github_review_for_file(
+                cwd,
+                "feature",
+                path,
+                "token",
+                20,
+                latest_write_at if latest_write_at is not None else self.WRITE_AT,
+            )
 
     def test_merged_pr_with_only_author_bot_and_pending_reviews_is_unreviewed(self):
-        search = {"items": [{"number": 5, "user": {"login": "dev"}}]}
         reviews = [
-            {"user": {"login": "dev"}, "state": "APPROVED"},
-            {"user": {"login": "copilot-pull-request-reviewer", "type": "Bot"}, "state": "COMMENTED"},
+            {"user": {"login": "dev"}, "state": "APPROVED", "submitted_at": self.AFTER_WRITE},
+            {
+                "user": {"login": "copilot-pull-request-reviewer", "type": "Bot"},
+                "state": "COMMENTED",
+                "submitted_at": self.AFTER_WRITE,
+            },
             {"user": {"login": "jane"}, "state": "PENDING"},
         ]
         comments = [
-            {"user": {"login": "github-actions[bot]"}, "path": "app.py"},
-            {"user": {"login": "Dev"}, "path": "app.py"},
+            {
+                "user": {"login": "github-actions[bot]"},
+                "path": "app.py",
+                "created_at": self.AFTER_WRITE,
+            },
+            {"user": {"login": "Dev"}, "path": "app.py", "created_at": self.AFTER_WRITE},
         ]
 
         self.assertEqual(
-            self.review([search, reviews, comments], ".", "app.py"), (0, ["github_merged_pr"])
+            self.review(
+                [self.search(5), self.pr(5), [{"filename": "app.py"}], reviews, comments],
+                ".",
+                "app.py",
+            ),
+            (0, ["github_merged_pr"]),
         )
 
     def test_line_comment_from_another_person_matches_an_absolute_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_repo(Path(tmp) / "repo")
-            search = {"items": [{"number": 5, "user": {"login": "dev"}}]}
-            reviews = [{"user": {"login": "jane"}, "state": "APPROVED"}]
-            comments = [{"user": {"login": "jane"}, "path": "src/app.py"}]
+            reviews = [
+                {
+                    "user": {"login": "jane"},
+                    "state": "APPROVED",
+                    "submitted_at": self.AFTER_WRITE,
+                }
+            ]
+            comments = [
+                {
+                    "user": {"login": "jane"},
+                    "path": "src/app.py",
+                    "created_at": self.AFTER_WRITE,
+                }
+            ]
 
-            result = self.review([search, reviews, comments], repo, str(Path(repo) / "src" / "app.py"))
+            result = self.review(
+                [
+                    self.search(5),
+                    self.pr(5),
+                    [{"filename": "src/app.py"}],
+                    reviews,
+                    comments,
+                ],
+                repo,
+                str(Path(repo) / "src" / "app.py"),
+            )
 
         self.assertEqual(
             result,
             (20, ["github_line_comments", "github_merged_pr", "github_review_comments", "github_reviews"]),
         )
+
+    def test_reused_branch_ignores_old_pr_and_uses_new_matching_pr(self):
+        reviews = [
+            {
+                "user": {"login": "jane"},
+                "state": "APPROVED",
+                "submitted_at": self.AFTER_WRITE,
+            }
+        ]
+
+        self.assertEqual(
+            self.review(
+                [
+                    self.search(4, 5),
+                    self.pr(4, merged_at=self.BEFORE_WRITE),
+                    self.pr(5),
+                    [{"filename": "app.py"}],
+                    reviews,
+                    [],
+                ],
+                ".",
+                "app.py",
+            ),
+            (15, ["github_merged_pr", "github_reviews"]),
+        )
+
+    def test_pr_without_the_file_provides_no_evidence(self):
+        self.assertEqual(
+            self.review(
+                [
+                    self.search(5),
+                    self.pr(5),
+                    [{"filename": "other.py"}],
+                ],
+                ".",
+                "app.py",
+            ),
+            (0, []),
+        )
+
+    def test_fork_pr_with_the_same_branch_name_provides_no_evidence(self):
+        self.assertEqual(
+            self.review(
+                [
+                    self.search(5),
+                    self.pr(5, head_repo="someone/widgets"),
+                ],
+                ".",
+                "app.py",
+            ),
+            (0, []),
+        )
+
+    def test_review_before_latest_write_does_not_count(self):
+        reviews = [
+            {
+                "user": {"login": "jane"},
+                "state": "APPROVED",
+                "submitted_at": self.BEFORE_WRITE,
+            }
+        ]
+        comments = [
+            {
+                "user": {"login": "jane"},
+                "path": "app.py",
+                "created_at": self.BEFORE_WRITE,
+            }
+        ]
+
+        self.assertEqual(
+            self.review(
+                [self.search(5), self.pr(5), [{"filename": "app.py"}], reviews, comments],
+                ".",
+                "app.py",
+            ),
+            (0, ["github_merged_pr"]),
+        )
+
+    def test_review_after_latest_write_counts(self):
+        reviews = [
+            {
+                "user": {"login": "jane"},
+                "state": "APPROVED",
+                "submitted_at": self.AFTER_WRITE,
+            }
+        ]
+
+        self.assertEqual(
+            self.review(
+                [self.search(5), self.pr(5), [{"filename": "app.py"}], reviews, []],
+                ".",
+                "app.py",
+            ),
+            (15, ["github_merged_pr", "github_reviews"]),
+        )
+
+    def test_ambiguous_and_paginated_searches_fail_closed(self):
+        ambiguous = [
+            self.search(4, 5),
+            self.pr(4),
+            [{"filename": "app.py"}],
+            self.pr(5),
+            [{"filename": "app.py"}],
+        ]
+        paginated = {
+            "total_count": 2,
+            "incomplete_results": False,
+            "items": [{"number": 5}],
+        }
+
+        self.assertEqual(self.review(ambiguous, ".", "app.py"), (0, []))
+        self.assertEqual(self.review([paginated], ".", "app.py"), (0, []))
 
 
 class TestMissingWorkingDirectory(unittest.TestCase):
@@ -752,27 +1113,39 @@ class TestMissingWorkingDirectory(unittest.TestCase):
         _commit(checkout, "src/app.py", "Add app")
         recorded = str(Path(tmp) / "gone" / "project")
         store = TraceStore(Path(tmp) / "traces")
-        meta = _make_store_session(store, recorded)
+        write_at = time.time() - 3600
+        meta = _make_store_session(store, recorded, started_at=write_at - 60)
         meta.attribution["git_repo"] = recorded_repo
         store.update_meta(meta)
-        _append_write(store, meta, os.path.join(recorded, "src", "app.py"), 4)
-        _append_write(store, meta, "/elsewhere/other.py", 2)
+        _append_write(
+            store,
+            meta,
+            os.path.join(recorded, "src", "app.py"),
+            4,
+            timestamp=write_at,
+        )
+        _append_write(store, meta, "/elsewhere/other.py", 2, timestamp=write_at)
         (Path(tmp) / "sibling.py").write_text("x\n", encoding="utf-8")
-        _append_write(store, meta, "../sibling.py", 3)
+        _append_write(store, meta, "../sibling.py", 3, timestamp=write_at)
         os.chdir(Path(checkout) / "src")
         return build_cognitive_debt_report(
             store,
-            window_start=time.time() - 60,
+            window_start=write_at - 120,
             window_end=time.time() + 60,
         )
 
     def test_matching_repository_reads_the_current_checkout(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "agent_trace.cognitive_debt._github_review_for_file",
+            return_value=(0, []),
+        ) as github_review:
             report = self.report(
                 tmp, "https://github.com/Acme/Widgets", "git@github.com:acme/widgets.git"
             )
 
         files = {Path(item.path).name: item for item in report.sessions[0].files}
+        self.assertEqual(github_review.call_count, 1)
+        self.assertTrue(github_review.call_args.args[2].endswith(os.path.join("src", "app.py")))
         self.assertTrue(report.git_available)
         self.assertTrue(files["app.py"].path.startswith(str(Path(tmp) / "gone")))
         self.assertEqual(files["app.py"].review_state, "known")

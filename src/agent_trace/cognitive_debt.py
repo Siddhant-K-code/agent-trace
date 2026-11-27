@@ -8,6 +8,7 @@ much of that code has review evidence.
 from __future__ import annotations
 
 import argparse
+import datetime
 import difflib
 import json
 import os
@@ -359,6 +360,25 @@ class _Checkout:
 
 
 _COMMIT_ID = re.compile(r"^[0-9a-fA-F]{4,64}$")
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _local_file_path(path: str) -> str | None:
+    """Return a local path for *path*, or None for an unsupported URI."""
+    if _WINDOWS_DRIVE_PATH.match(path) or path.startswith("\\\\"):
+        return path
+    parsed = urllib.parse.urlsplit(path)
+    if not parsed.scheme:
+        return path
+    if (
+        parsed.scheme.lower() != "file"
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc.lower() not in ("", "localhost")
+    ):
+        return None
+    local = urllib.request.url2pathname(urllib.parse.unquote(parsed.path))
+    return local or None
 
 
 def _may_be_subdirectory(toplevel: str, recorded: str, commit: str) -> bool:
@@ -433,10 +453,15 @@ def _in_any_repository(path: str) -> bool:
 def _checkout_path(checkout: _Checkout, path: str) -> str | None:
     """Return *path* as git in ``checkout.cwd`` must see it.
 
-    Outside fallback mode the recorded path is used as is. In fallback mode a
-    path under the recorded directory is moved to the same place in the
-    current checkout. None means the current checkout has no such file.
+    Local file URIs are converted before containment checks. Outside fallback
+    mode the recorded path is otherwise used as is. In fallback mode a path
+    under the recorded directory is moved to the same place in the current
+    checkout. None means the path is unsupported or the current checkout has
+    no such file.
     """
+    path = _local_file_path(path)
+    if path is None:
+        return None
     if not checkout.fallback:
         return path
     try:
@@ -712,19 +737,44 @@ def modified_file_lines(events: list[TraceEvent]) -> dict[str, int]:
     return files
 
 
-def _modified_file_coverage(events: list[TraceEvent]) -> tuple[dict[str, int], int]:
-    files: dict[str, int] = {}
+@dataclass(frozen=True)
+class _ModifiedFileStats:
+    lines: int
+    latest_write_at: float
+
+
+def _modified_file_stats(
+    events: list[TraceEvent],
+) -> tuple[dict[str, _ModifiedFileStats], int]:
+    files: dict[str, _ModifiedFileStats] = {}
     unknown_authorship_lines = 0
     failed = _failed_call_indexes(events)
     for index, event in enumerate(events):
         if not _is_write_event(event) or index in failed:
             continue
+        timestamp = usable_time(event.timestamp)
+        if timestamp is None:
+            raise CognitiveDebtInputError("write event timestamp was unusable")
         for path, lines in _write_line_counts(event):
             if not path:
                 unknown_authorship_lines += lines
                 continue
-            files[path] = files.get(path, 0) + lines
+            previous = files.get(path)
+            files[path] = _ModifiedFileStats(
+                lines=lines + (previous.lines if previous else 0),
+                latest_write_at=max(timestamp, previous.latest_write_at)
+                if previous
+                else timestamp,
+            )
     return files, unknown_authorship_lines
+
+
+def _modified_file_coverage(events: list[TraceEvent]) -> tuple[dict[str, int], int]:
+    files, unknown_authorship_lines = _modified_file_stats(events)
+    return (
+        {path: stats.lines for path, stats in files.items()},
+        unknown_authorship_lines,
+    )
 
 
 def _git_available(cwd: str) -> bool:
@@ -734,24 +784,32 @@ def _git_available(cwd: str) -> bool:
 def _review_rev(cwd: str, branch: str) -> str | None:
     """Return the commit whose history holds the session's work.
 
-    That is the session branch, then its ``origin`` copy, then HEAD. None
-    means the repository has no commits.
+    A known session branch must exist locally or on ``origin``. HEAD is used
+    only when the session branch is absent or unknown. None means the required
+    revision is unavailable.
     """
-    refs = []
     if branch and branch not in ("HEAD", "(unknown)"):
-        refs.extend((f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"))
-    refs.append("HEAD")
+        refs = (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}")
+    else:
+        refs = ("HEAD",)
     for ref in refs:
         sha = _git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
         if sha:
             return sha
+    if (
+        branch
+        and branch not in ("HEAD", "(unknown)")
+        and not _git(cwd, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+        and _git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD") == branch
+    ):
+        return "(unborn)"
     return None
 
 
 def _review_log(cwd: str, path: str, since_ts: float, rev: str | None = "HEAD") -> str:
     if rev is None:
         return ""
-    since = f"@{int(since_ts)}"
+    since = f"@{max(0, int(since_ts) - 1)}"
     try:
         result = subprocess.run(
             [
@@ -761,7 +819,7 @@ def _review_log(cwd: str, path: str, since_ts: float, rev: str | None = "HEAD") 
                 "log",
                 rev,
                 f"--since={since}",
-                "--format=%H%x00%ae%x00%an%x00%s%x00%b%x1e",
+                "--format=%H%x00%ct%x00%ae%x00%an%x00%s%x00%b%x1e",
                 "--",
                 path,
             ],
@@ -823,24 +881,38 @@ def _review_for_file(
 ) -> tuple[int, list[str], bool]:
     if not _git_available(cwd):
         return 0, ["git_unavailable"], False
+    if rev == "(unborn)":
+        return 0, ["not_committed"], True
+    if rev is None:
+        return 0, ["git_revision_unavailable"], False
 
     raw = _review_log(cwd, path, since_ts, rev)
     if not raw:
         return 0, ["not_committed"], True
 
     signals: set[str] = {"committed_after_session"}
+    qualifying_commit = False
     for record in raw.split("\x1e"):
         if not record.strip():
             continue
-        parts = record.strip().split("\x00", 4)
-        if len(parts) != 5 or not parts[0] or not parts[1]:
+        parts = record.strip().split("\x00", 5)
+        if len(parts) != 6 or not parts[0] or not parts[1] or not parts[2]:
             raise CognitiveDebtInputError("local review history was malformed")
-        _, author_email, author_name, _subject, body = parts
+        _, commit_time_raw, author_email, author_name, _subject, body = parts
+        try:
+            commit_time = float(commit_time_raw)
+        except ValueError as exc:
+            raise CognitiveDebtInputError("local review history was malformed") from exc
+        if commit_time <= since_ts:
+            continue
+        qualifying_commit = True
         if any(
             _names_other_person(match.group(1), author_email, author_name)
             for match in _REVIEWED_BY.finditer(body)
         ):
             signals.add("reviewed_by_trailer")
+    if not qualifying_commit:
+        return 0, ["not_committed"], True
     factor = max(LOCAL_REVIEW_WEIGHTS[signal] for signal in signals)
     return min(agent_lines, int(round(agent_lines * factor))), sorted(signals), True
 
@@ -913,57 +985,166 @@ def _repo_relative_path(cwd: str, path: str) -> str:
     return rel.replace(os.sep, "/")
 
 
+def _github_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
 def _github_review_for_file(
     cwd: str,
     branch: str,
     path: str,
     token: str,
     agent_lines: int,
+    latest_write_at: float,
 ) -> tuple[int, list[str]]:
     repo = _github_repo(cwd)
     if not repo or not token or not branch or branch == "(unknown)":
         return 0, []
     owner, name = repo
+    repo_path = _repo_relative_path(cwd, path)
+    if not repo_path:
+        return 0, []
     query = urllib.parse.urlencode({
         "q": f"repo:{owner}/{name} is:pr is:merged head:{branch}",
-        "per_page": "5",
+        "per_page": "100",
     })
     try:
         search = _github_json(f"/search/issues?{query}", token)
-        if not isinstance(search, dict) or not isinstance(search.get("items"), list):
+        if (
+            not isinstance(search, dict)
+            or search.get("incomplete_results") is not False
+            or isinstance(search.get("total_count"), bool)
+            or not isinstance(search.get("total_count"), int)
+            or not isinstance(search.get("items"), list)
+        ):
             raise CognitiveDebtInputError("GitHub review search response was malformed")
         items = search["items"]
+        if search["total_count"] != len(items) or len(items) > 100:
+            return 0, []
         if not items:
             return 0, []
-        if not isinstance(items[0], dict):
-            raise CognitiveDebtInputError("GitHub review search response was malformed")
-        number = items[0].get("number")
-        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
-            raise CognitiveDebtInputError("GitHub review search response was malformed")
-        pr_author, _ = _github_login(items[0])
+
+        candidates: list[tuple[int, str]] = []
+        seen_numbers: set[int] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise CognitiveDebtInputError("GitHub review search response was malformed")
+            number = item.get("number")
+            if (
+                isinstance(number, bool)
+                or not isinstance(number, int)
+                or number <= 0
+                or number in seen_numbers
+            ):
+                raise CognitiveDebtInputError("GitHub review search response was malformed")
+            seen_numbers.add(number)
+            detail = _github_json(f"/repos/{owner}/{name}/pulls/{number}", token)
+            if not isinstance(detail, dict) or detail.get("number") != number:
+                raise CognitiveDebtInputError("GitHub pull request response was malformed")
+            base = detail.get("base")
+            head = detail.get("head")
+            base_repo = base.get("repo") if isinstance(base, dict) else None
+            head_repo = head.get("repo") if isinstance(head, dict) else None
+            full_name = base_repo.get("full_name") if isinstance(base_repo, dict) else None
+            head_full_name = (
+                head_repo.get("full_name") if isinstance(head_repo, dict) else None
+            )
+            head_ref = head.get("ref") if isinstance(head, dict) else None
+            merged_at = _github_timestamp(detail.get("merged_at"))
+            changed_files = detail.get("changed_files")
+            pr_author, _ = _github_login(detail)
+            if (
+                not isinstance(full_name, str)
+                or full_name.lower() != f"{owner}/{name}".lower()
+                or not isinstance(head_full_name, str)
+                or head_ref != branch
+                or detail.get("merged") is not True
+                or merged_at is None
+                or isinstance(changed_files, bool)
+                or not isinstance(changed_files, int)
+                or changed_files < 0
+                or not pr_author
+            ):
+                raise CognitiveDebtInputError("GitHub pull request response was malformed")
+            if head_full_name.lower() != f"{owner}/{name}".lower():
+                continue
+            if merged_at <= latest_write_at:
+                continue
+            pr_files = _github_json(
+                f"/repos/{owner}/{name}/pulls/{number}/files?per_page=100",
+                token,
+            )
+            if (
+                not isinstance(pr_files, list)
+                or len(pr_files) != changed_files
+                or any(not isinstance(item, dict) for item in pr_files)
+            ):
+                return 0, []
+            filenames = [item.get("filename") for item in pr_files]
+            if any(not isinstance(filename, str) for filename in filenames):
+                raise CognitiveDebtInputError("GitHub pull request files response was malformed")
+            if repo_path in filenames:
+                candidates.append((number, pr_author))
+        if len(candidates) != 1:
+            return 0, []
+
+        number, pr_author = candidates[0]
+        reviews = _github_json(f"/repos/{owner}/{name}/pulls/{number}/reviews?per_page=100", token)
+        if (
+            not isinstance(reviews, list)
+            or len(reviews) >= 100
+            or any(not isinstance(item, dict) for item in reviews)
+        ):
+            raise CognitiveDebtInputError("GitHub reviews response was malformed")
+        submitted = []
+        for review in reviews:
+            state = review.get("state")
+            if not isinstance(state, str):
+                raise CognitiveDebtInputError("GitHub reviews response was malformed")
+            if state == "PENDING":
+                continue
+            submitted_at = _github_timestamp(review.get("submitted_at"))
+            if submitted_at is None:
+                raise CognitiveDebtInputError("GitHub reviews response was malformed")
+            if submitted_at > latest_write_at:
+                submitted.append(review)
 
         signals = {"github_merged_pr"}
-        reviews = _github_json(f"/repos/{owner}/{name}/pulls/{number}/reviews?per_page=100", token)
-        if not isinstance(reviews, list) or any(not isinstance(item, dict) for item in reviews):
-            raise CognitiveDebtInputError("GitHub reviews response was malformed")
-        submitted = [review for review in reviews if review.get("state") != "PENDING"]
         if _by_other_person(submitted, pr_author):
             signals.add("github_reviews")
         comments = _github_json(f"/repos/{owner}/{name}/pulls/{number}/comments?per_page=100", token)
-        if not isinstance(comments, list) or any(not isinstance(item, dict) for item in comments):
+        if (
+            not isinstance(comments, list)
+            or len(comments) >= 100
+            or any(not isinstance(item, dict) for item in comments)
+        ):
             raise CognitiveDebtInputError("GitHub review comments response was malformed")
-        comments = _by_other_person(comments, pr_author)
+        recent_comments = []
+        for comment in comments:
+            created_at = _github_timestamp(comment.get("created_at"))
+            if created_at is None:
+                raise CognitiveDebtInputError("GitHub review comments response was malformed")
+            if created_at > latest_write_at:
+                recent_comments.append(comment)
+        comments = _by_other_person(recent_comments, pr_author)
         if comments:
             signals.add("github_review_comments")
-            repo_path = _repo_relative_path(cwd, path)
-            if repo_path and any(comment.get("path") == repo_path for comment in comments):
+            if any(comment.get("path") == repo_path for comment in comments):
                 signals.add("github_line_comments")
         factor = max(GITHUB_REVIEW_WEIGHTS[signal] for signal in signals)
         return min(agent_lines, int(round(agent_lines * factor))), sorted(signals)
     except CognitiveDebtInputError:
-        raise
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise CognitiveDebtInputError("GitHub review response was malformed") from exc
+        return 0, []
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError):
+        return 0, []
     except (OSError, urllib.error.HTTPError, urllib.error.URLError):
         return 0, []
 
@@ -1001,10 +1182,11 @@ def analyze_session_debt(
     )
 
     files = []
-    modified_files, unknown_authorship_lines = _modified_file_coverage(events)
+    modified_files, unknown_authorship_lines = _modified_file_stats(events)
     total_written = unknown_authorship_lines
     total_reviewed = 0
-    for path, lines in sorted(modified_files.items()):
+    for path, stats in sorted(modified_files.items()):
+        lines = stats.lines
         git_path = _checkout_path(checkout, path)
         outside = bool(
             git_path is not None
@@ -1021,10 +1203,19 @@ def analyze_session_debt(
             reviewed, signals, review_known = 0, ["not_in_checkout"], False
         else:
             reviewed, signals, review_known = _review_for_file(
-                cwd, git_path, meta.started_at, lines, rev=rev
+                cwd, git_path, stats.latest_write_at, lines, rev=rev
             )
-        gh_reviewed, gh_signals = (0, []) if outside else _github_review_for_file(
-            cwd, branch, git_path or path, github_token, lines
+        gh_reviewed, gh_signals = (
+            (0, [])
+            if outside or git_path is None
+            else _github_review_for_file(
+                cwd,
+                branch,
+                git_path,
+                github_token,
+                lines,
+                stats.latest_write_at,
+            )
         )
         if gh_reviewed > reviewed:
             reviewed = gh_reviewed
