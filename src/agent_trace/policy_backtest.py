@@ -28,7 +28,7 @@ from .audit import (
 )
 from .event_data import event_id_of
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .store import TraceStore
 
 
@@ -539,8 +539,9 @@ def _select_sessions(
     window_start = None if days is None else window_end - days * 86400
     sessions = [
         meta for meta in store.list_sessions()
-        if (window_start is None or meta.started_at >= window_start)
-        and meta.started_at <= window_end
+        if (started := usable_time(meta.started_at)) is not None
+        and (window_start is None or started >= window_start)
+        and started <= window_end
     ]
     return sessions, window_start, window_end
 

@@ -861,8 +861,8 @@ agent-strace baseline check "$SESSION_ID"
 ```
 
 It also exits 1 when the session cannot be measured (`[UNSCORED]`). A session
-with no end time, such as one the watchdog killed, is scored on the events it
-recorded; see [commands.md](commands.md#baseline).
+with no usable end time, such as one the watchdog killed, is scored on the
+events it recorded; see [commands.md](commands.md#baseline).
 
 ## EU AI Act Audit Packages
 

@@ -38,7 +38,7 @@ from .hooks import (
     REDACTION_ON,
     _PROVIDER_AGENT,
 )
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
 from .store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
@@ -266,11 +266,12 @@ def session_finalized_for(
 ) -> bool | None:
     """Return the ``session_finalized`` value passed to the core.
 
-    ``True`` when the metadata records an end time. ``False`` only when the
-    matrix says the provider captures ``session_end`` and a hook active-session
-    marker still names the session. Otherwise ``None`` (not known).
+    ``True`` when the metadata records a usable end time. ``False`` only when
+    the matrix says the provider captures ``session_end`` and a hook
+    active-session marker still names the session. Otherwise ``None`` (not
+    known).
     """
-    if meta.ended_at is not None:
+    if usable_time(meta.ended_at) is not None:
         return True
     if (
         entry is not None

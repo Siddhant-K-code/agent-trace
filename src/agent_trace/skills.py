@@ -39,7 +39,7 @@ from .event_data import (
     is_editor_view,
 )
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .review import is_test_argv
 from .shell_split import is_break, split_tokens
 from .store import TraceStore
@@ -1433,7 +1433,7 @@ def analyze_session(
     base = _real(cwd) or cwd
 
     candidates = [event.timestamp for _, event in ordered]
-    meta_start = _coerce_timestamp(started_at) if started_at else None
+    meta_start = usable_time(started_at)
     if meta_start:
         candidates.append(meta_start)
     start = min(candidates) if candidates else 0.0
@@ -1728,8 +1728,10 @@ def build_aggregate_report(
 ) -> dict[str, Any]:
     """Aggregate the sessions that started at or after ``since``.
 
-    With ``exclude_skills_eval``, sessions that ran in a ``skills eval``
-    workspace are left out and counted in ``sessions_excluded``.
+    A session whose start time is not usable counts as unreadable or
+    malformed. With ``exclude_skills_eval``, sessions that ran in a
+    ``skills eval`` workspace are left out and counted in
+    ``sessions_excluded``.
     """
     catalogs: dict[str, SkillCatalog] = {}
     definitions: dict[str, SkillDefinition | None] = {}
@@ -1739,8 +1741,11 @@ def build_aggregate_report(
     listed = store.list_sessions()
     for meta in listed:
         try:
-            started = _coerce_timestamp(meta.started_at)
-            if started is not None and started < since:
+            started = usable_time(meta.started_at)
+            if started is None:
+                skipped += 1
+                continue
+            if started < since:
                 before_window += 1
                 continue
             report = build_session_report(

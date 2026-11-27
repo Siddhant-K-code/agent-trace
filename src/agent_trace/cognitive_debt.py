@@ -25,7 +25,7 @@ from typing import Any, TextIO
 from .budget_report import _parse_date
 from .event_data import require_object_event_data
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
 from .store import (
     AmbiguousSessionPrefixError,
     InvalidSessionIDError,
@@ -711,6 +711,10 @@ def build_cognitive_debt_report(
             full_id = store.find_session(session_id) or session_id
             if store.session_exists(full_id):
                 metas = [store.load_meta(full_id)]
+                # Refuse it as list_sessions_strict refuses one without
+                # --session.
+                if usable_time(metas[0].started_at) is None:
+                    raise ValueError("started_at is not a usable time")
         else:
             # The report does not filter by tenant, so the tenant
             # administration check on untagged metadata does not apply.

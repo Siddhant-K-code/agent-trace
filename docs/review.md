@@ -177,6 +177,9 @@ Stewardship counts turns and decisions. It does not rank or score people.
 | `commit_time` | No branch match. The session closest to the head commit time was used. |
 | `latest` | No branch or commit to match. The latest session was used. |
 
+`commit_time` matches only a session whose start time is usable. When no
+session has a usable start time, `latest` is used.
+
 In a pull request job, `commit_time` uses the PR head commit from the event
 payload (`pull_request.head.sha` on GitHub, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA`
 on GitLab), not the synthetic merge commit that `actions/checkout` creates.

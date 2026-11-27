@@ -263,7 +263,7 @@ def run_eval_gate(
     # cost_usd prices the session with estimate_cost, which reads event
     # times, so it checks every event, as agent-strace cost does.
     # duration_seconds reads every event's time when the metadata holds no
-    # duration.
+    # usable duration.
     if "cost_usd" in metrics or (
         "duration_seconds" in metrics
         and duration_reads_event_times(events, store.load_meta(session_id))

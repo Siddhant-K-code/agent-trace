@@ -423,13 +423,31 @@ A start time that is not usable also reads as missing in these commands:
 - `sample` writes `null` as the start, and `--strategy recent` treats the session as the oldest.
 - `mcp-scan` finds no session earlier than it, and does not count it as earlier than another session.
 - `review` sorts the session as if it started at 0.
+- `skills <id>` times the skill loads from the first event.
+- `pr-comment` and `eval gate` do not use it for the duration.
+- `pr-comment` and `review` never link the session by commit time. When no session has a usable start time, they link the latest session.
+- `server --dashboard` takes the start from the first item on the review and share pages, and leaves `started_at` out of `/api/sessions`.
+
+An end time that is not usable reads as no end, as `null` does:
+
+- `postmortem` and `postmortem --list` treat the session as not ended, so a stale heartbeat reports it as crashed.
+- `health` does not count the session as finished.
+- `baseline check` scores it as an open session, and `baseline update` leaves it out.
+- `eval gate` reports the session as `killed` when it has no `session_end` event, and does not use the end for the duration.
+- `pr-comment` reports the session as in progress when it has no `session_end` event, and does not use the end for the duration.
+- `server --dashboard` takes the end from the `session_end` event on the review and share pages, and leaves `ended_at` out of `/api/sessions`.
 
 Such a session is in no time window. `dashboard --trend --since`, `drift`,
 `budget-report`, `team-report`, `context-score`, `lint --all --since`,
-`mcp-scan` without `--session`, and `oncall` leave it out.
+`mcp-scan` without `--session`, `oncall`, `cost --breakdown provider`,
+`cost --tenant`, `policy backtest`, `policy diff`, `policy coverage`,
+`eval dataset auto`, `baseline update`, and the project budget in `watch`,
+`record` and `record-http` leave it out. `skills` without a session ID counts
+it as unreadable or malformed.
 `config-watch affected` always leaves it out, since it cannot place the
 session after a change. `share` refuses a session whose start time, or end
-time when set, is not usable. See [`share`](#share).
+time when set, is not usable. See [`share`](#share). `cognitive-debt --session`
+refuses such a session, as `cognitive-debt` without `--session` does.
 
 A `meta.json` can also hold a `total_duration_ms`, `tool_calls`, `llm_requests`,
 `errors`, `total_tokens` or `depth` that is not a usable number, such as text,
@@ -597,7 +615,7 @@ proxy, exec wrapper or SDK, imported sessions, providers without an entry
 
 Whether the session has finished:
 
-- Finished when its metadata records an end time.
+- Finished when its metadata records a usable end time.
 - Active when the matrix marks `session_end` as captured for the provider and a
   hook active-session marker still names the session. Active sessions report
   `session_active` instead of `missing_session_end`. A crashed session can
@@ -1566,7 +1584,8 @@ writes a lightweight heartbeat while monitoring; if the heartbeat becomes
 stale and the session has no clean `SESSION_END`, `postmortem` classifies the
 crash and writes `.agent-traces/<session-id>/postmortem.md` with recovery
 context. A `SESSION_START` after the last `SESSION_END` (a resume) reopens the
-session, so that `SESSION_END` and its exit code no longer count.
+session, so that `SESSION_END` and its exit code no longer count. An `ended_at`
+in `meta.json` that is not a usable time reads as no end.
 
 | Flag | Description |
 |---|---|
@@ -2006,7 +2025,7 @@ upgrading.
 missing or unreadable baseline, so it can be used as a CI gate. See
 [production.md](production.md#baseline-anomaly-detection) for an example.
 
-`check` also scores a session with no end time, such as one that is still
+`check` also scores a session with no usable end time, such as one that is still
 running or was crashed or killed (an agent that `watch` kills usually never
 records an end time). Its tool calls and LLM requests are the larger of the metadata
 counter and the matching events, its duration runs from the start to its last
@@ -2211,8 +2230,8 @@ criterion-specific parameters it declares. When a lint rule could not run, a
 an exit code too large for a float. It differs from those rules in three ways:
 
 - With no `session_end`, or when a later `session_start` (a resume) reopened
-  the session, the session is `completed` when its metadata has `ended_at`,
-  else `killed`.
+  the session, the session is `completed` when its metadata has a usable
+  `ended_at` other than 0, else `killed`.
 - It also reads a text exit code such as `"1"`.
 - It reads a reason that is not text, such as a list, as text.
 
@@ -2311,7 +2330,7 @@ Measure review coverage for agent-written code from trace file-write events and 
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
-`cognitive-debt` exits 1 with "trace input could not be read safely" when a session it reads has a [corrupt](#list) `meta.json`. Without `--session`, it reads every session in the store. With `--session`, it prints `Session not found: ID` and exits 1 when no session has that ID or prefix, or when the store refuses to read the session. See [Session IDs](#session-ids).
+`cognitive-debt` exits 1 with "trace input could not be read safely" when a session it reads has a [corrupt](#list) `meta.json`. It exits 1 with the same line when the start time of a session it reads is not usable, with or without `--session`. Without `--session`, it reads every session in the store. With `--session`, it prints `Session not found: ID` and exits 1 when no session has that ID or prefix, or when the store refuses to read the session. See [Session IDs](#session-ids).
 
 ### `context-score`
 ```
@@ -2368,7 +2387,7 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 
 With no sessions in the trace store, the command prints how to read Claude Code, GitHub Copilot or Codex history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
-When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: the session started before the `--since` window, or its stored trace cannot be read (shown as `unreadable or malformed`). With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. With `--from-claude`, only regular `.jsonl` files are read, each as [`import`](#import) reads it. A transcript is counted as unreadable when it cannot be read, has no Claude Code transcript record, or has no usable session ID. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. With `--from-copilot` or `--from-codex`, a record timestamp that cannot be read as a time from 1970 on, such as a negative number or an integer too large for a float, is ignored, and the event takes the time of the event before it or of the session start. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
+When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: the session started before the `--since` window, or its stored trace cannot be read or its start time is not usable (shown as `unreadable or malformed`). With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. With `--from-claude`, only regular `.jsonl` files are read, each as [`import`](#import) reads it. A transcript is counted as unreadable when it cannot be read, has no Claude Code transcript record, or has no usable session ID. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. With `--from-copilot` or `--from-codex`, a record timestamp that cannot be read as a time from 1970 on, such as a negative number or an integer too large for a float, is ignored, and the event takes the time of the event before it or of the session start. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
 
 ### `skills eval`
 ```
@@ -3574,8 +3593,8 @@ working when the bad event is one they never read:
   it finds. It checks nothing in a session with no compaction.
 - `compliance export`: `tool_call` and `error` events.
 - `eval gate`: every event, when the config has `cost_usd`, or has
-  `duration_seconds` and the session metadata holds no duration. It names the
-  session.
+  `duration_seconds` and the session metadata holds no usable duration. It
+  names the session.
 - `eval run`, `eval compare`, and `eval ci`: each session they score. With
   `cost_under` in the config, they check every event, as `cost` does. With
   `duration_under` and no `cost_under`, they check the first and last events.

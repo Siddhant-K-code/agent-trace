@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 
 from .cost import estimate_cost
+from .models import usable_time
 from .store import TraceStore
 
 
@@ -290,7 +291,10 @@ def rolling_project_spend(
     window_seconds: float = ROLLING_WINDOW_SECONDS,
     exclude_session_id: str = "",
 ) -> float:
-    """Estimate spend for sessions started in the rolling project window."""
+    """Estimate spend for sessions started in the rolling project window.
+
+    A session whose start time is not usable is in no window.
+    """
 
     window_end = time.time() if now is None else now
     window_start = window_end - window_seconds
@@ -299,7 +303,8 @@ def rolling_project_spend(
     for meta in store.list_sessions():
         if meta.session_id == exclude_session_id:
             continue
-        if not (window_start <= meta.started_at < window_end):
+        started = usable_time(meta.started_at)
+        if started is None or not (window_start <= started < window_end):
             continue
         try:
             total += estimate_cost(store, meta.session_id).total_cost

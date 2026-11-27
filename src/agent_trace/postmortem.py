@@ -25,7 +25,7 @@ from .event_data import (
 )
 from .explain import explain_session
 from .inert import inert
-from .models import EventType, TraceEvent, usable_number
+from .models import EventType, TraceEvent, usable_number, usable_time
 from .session_outcome import final_session_end, final_session_end_index
 from .store import TraceStore
 
@@ -228,6 +228,16 @@ def _session_exit_code(events: list[TraceEvent]) -> int | None:
         return None
 
 
+def _last_event_at(events: list[TraceEvent], started_at: object) -> float:
+    """Return the last event time, or the start time when there are no events.
+
+    A start time that is not usable gives 0.0, as if it were missing.
+    """
+    if events:
+        return events[-1].timestamp
+    return started_at if usable_time(started_at) is not None else 0.0
+
+
 def _event_text(events: list[TraceEvent], limit: int = 20) -> str:
     chunks = []
     for event in events[-limit:]:
@@ -328,7 +338,7 @@ def detect_crash(
     if exit_code not in (None, 0):
         reason, detail = _classify_crash(events, exit_code=exit_code)
     else:
-        if meta.ended_at or _has_clean_session_end(events):
+        if usable_time(meta.ended_at) or _has_clean_session_end(events):
             return None
         hb_path = heartbeat_path(store, session_id)
         if not hb_path.exists():
@@ -343,7 +353,7 @@ def detect_crash(
             detail=detail,
             stale_seconds=stale_seconds,
             last_event_type=events[-1].event_type.value if events else "",
-            last_event_at=events[-1].timestamp if events else meta.started_at,
+            last_event_at=_last_event_at(events, meta.started_at),
         )
 
     return CrashInfo(
@@ -352,7 +362,7 @@ def detect_crash(
         detail=detail,
         exit_code=exit_code,
         last_event_type=events[-1].event_type.value if events else "",
-        last_event_at=events[-1].timestamp if events else meta.started_at,
+        last_event_at=_last_event_at(events, meta.started_at),
     )
 
 
