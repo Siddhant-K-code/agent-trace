@@ -26,13 +26,17 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
+from .drift import _bounded_int, _finite_float, _finite_number, _refuse_constant
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES
 from .failures import count_session_errors
+from .inert import inert
 from .models import (
+    MAX_META_DEPTH,
     SINCE_DAYS_FORM,
     EventType,
     TraceEvent,
+    _nests_deeper_than,
     parse_since_days,
     usable_count,
     usable_number,
@@ -110,16 +114,53 @@ class BaselineProfile:
 
     @classmethod
     def from_json(cls, text: str) -> "BaselineProfile":
-        d = json.loads(text)
+        """Build a profile from ``text``, or raise ValueError with the reason.
+
+        ``check`` does math on each metric's ``mean``, ``stddev`` and
+        ``count``, and ``show`` prints its ``mean``, ``stddev``, ``min`` and
+        ``max``. So the text must be a JSON object that nests at most
+        MAX_META_DEPTH levels and holds no NaN, infinity, float out of range
+        or int of more than 4300 digits. Each metric must be an object. Its
+        ``mean``, ``min`` and ``max`` must be finite numbers, and its
+        ``stddev`` and ``count`` finite numbers of 0 or more, none of them
+        bools. A missing field reads as its default.
+
+        ``created_at`` and ``session_count`` keep any value. They are only
+        shown, never used in the math.
+        """
+        try:
+            d = json.loads(text, parse_constant=_refuse_constant,
+                           parse_float=_finite_float, parse_int=_bounded_int)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+            ) from None
+        except RecursionError:
+            raise ValueError("it is nested too deeply") from None
+        # Check the depth before the type. Python 3.10 cannot parse a list
+        # nested 2000 levels and 3.14 can, so a deep list must be refused as
+        # too deep on both, not as "not a JSON object" on one.
+        if isinstance(d, (dict, list)) and _nests_deeper_than(d, MAX_META_DEPTH):
+            raise ValueError("it is nested too deeply")
+        if not isinstance(d, dict):
+            raise ValueError("it is not a JSON object")
         profile = cls()
         profile.created_at = d.get("created_at", 0.0)
         profile.session_count = d.get("session_count", 0)
         for metric in ("cost_usd", "tool_calls", "duration_ms", "error_rate", "llm_requests"):
             raw = d.get(metric, {})
-            setattr(profile, metric, MetricStats(**{
-                k: raw.get(k, 0.0) if k != "count" else raw.get(k, 0)
-                for k in ("mean", "stddev", "min", "max", "count")
-            }))
+            if not isinstance(raw, dict):
+                raise ValueError(f"{metric} is not an object")
+            stats = {}
+            for key in ("mean", "stddev", "min", "max", "count"):
+                value = raw.get(key, 0 if key == "count" else 0.0)
+                if key in ("stddev", "count"):
+                    if usable_number(value) is None:
+                        raise ValueError(f"{metric}.{key} is not a number of 0 or more")
+                elif not _finite_number(value):
+                    raise ValueError(f"{metric}.{key} is not a finite number")
+                stats[key] = value
+            setattr(profile, metric, MetricStats(**stats))
         return profile
 
 
@@ -385,18 +426,46 @@ def save_baseline(profile: BaselineProfile, path: str = DEFAULT_BASELINE_PATH) -
 
 
 def load_baseline(path: str = DEFAULT_BASELINE_PATH) -> BaselineProfile | None:
-    p = Path(path)
-    if not p.exists():
-        return None
+    """Read the profile at ``path``.
+
+    Return None when no file is at ``path``. Raise ValueError with the reason
+    when the file cannot be read or used. The reason does not name the file.
+    The file is opened with no check that it is a regular file, so a pipe
+    such as ``--baseline <(cmd)`` reads too. It is decoded as UTF-8 whatever
+    the locale, since ``update`` writes UTF-8.
+    """
+    if not path:
+        raise ValueError("the path is empty")
     try:
-        return BaselineProfile.from_json(p.read_text())
-    except Exception:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        # str(exc) repeats the path, which the refusal line already shows.
+        raise ValueError(exc.strerror or "it cannot be read") from None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("it is not valid UTF-8") from None
+    # Skip one byte order mark, which some Windows editors write. json.loads
+    # refuses text that starts with one.
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return BaselineProfile.from_json(text)
 
 
 # ---------------------------------------------------------------------------
 # CLI handler
 # ---------------------------------------------------------------------------
+
+def _refuse_baseline_file(path: str, exc: ValueError) -> int:
+    # Show escapes in the path and the reason as text. An empty path shows
+    # as '' so that the line still shows a path.
+    shown = inert(path) if path else "''"
+    sys.stderr.write(f"Could not read baseline file {shown}: {inert(exc)}\n")
+    return 1
+
 
 def cmd_baseline(args: argparse.Namespace) -> int:
     sub = getattr(args, "baseline_cmd", None)
@@ -432,7 +501,10 @@ def cmd_baseline(args: argparse.Namespace) -> int:
 
         baseline_path = getattr(args, "baseline_path", DEFAULT_BASELINE_PATH)
         sigma = float(getattr(args, "sigma", DEFAULT_SIGMA))
-        profile = load_baseline(baseline_path)
+        try:
+            profile = load_baseline(baseline_path)
+        except ValueError as exc:
+            return _refuse_baseline_file(baseline_path, exc)
         if not profile:
             sys.stderr.write(f"No baseline found at {baseline_path}. "
                              f"Run: agent-strace baseline update\n")
@@ -444,12 +516,20 @@ def cmd_baseline(args: argparse.Namespace) -> int:
 
     elif sub == "show":
         baseline_path = getattr(args, "baseline_path", DEFAULT_BASELINE_PATH)
-        profile = load_baseline(baseline_path)
+        try:
+            profile = load_baseline(baseline_path)
+        except ValueError as exc:
+            return _refuse_baseline_file(baseline_path, exc)
         if not profile:
             sys.stderr.write(f"No baseline found at {baseline_path}\n")
             return 1
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(profile.created_at))
-        sys.stdout.write(f"\nBaseline ({profile.session_count} sessions, built {ts})\n\n")
+        # created_at and session_count can hold any JSON value.
+        built = usable_time(profile.created_at)
+        if built is None:
+            when = "build time unknown"
+        else:
+            when = "built " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))
+        sys.stdout.write(f"\nBaseline ({inert(profile.session_count)} sessions, {when})\n\n")
         sys.stdout.write(f"  {'Metric':<18} {'Mean':>10} {'Stddev':>10} {'Min':>10} {'Max':>10}\n")
         sys.stdout.write(f"  {'-'*18} {'-'*10} {'-'*10} {'-'*10} {'-'*10}\n")
         for metric in ("cost_usd", "tool_calls", "duration_ms", "error_rate", "llm_requests"):
