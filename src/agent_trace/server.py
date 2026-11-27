@@ -60,7 +60,7 @@ from .event_data import (
     refused_timestamp_warning,
 )
 from .fileutil import split_lf_lines
-from .models import SessionMeta, TraceEvent, usable_time
+from .models import SessionMeta, TraceEvent, finite_json_dumps, usable_time
 from .store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
@@ -342,7 +342,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
         return auth == f"Bearer {self._auth_key}"
 
     def _send_json(self, status: int, data: dict, *, vary: str | None = None) -> None:
-        body = json.dumps(data).encode("utf-8")
+        body = finite_json_dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

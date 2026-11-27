@@ -32,7 +32,13 @@ from .event_data import (
     require_usable_timestamps,
 )
 from .explain import PHASE_DATA_EVENT_TYPES
-from .models import usable_count, usable_number, usable_text, usable_time
+from .models import (
+    finite_json_dumps,
+    usable_count,
+    usable_number,
+    usable_text,
+    usable_time,
+)
 from .otlp import OTLP_TIMESTAMP_EVENT_TYPES, otlp_data_indexes, session_to_otlp
 from .review_surface import (
     build_minimized_review_payload,
@@ -792,8 +798,7 @@ def api_sessions(store: "TraceStore") -> str:
             if not usable_text(session.get(field)):
                 session.pop(field, None)
         # The page adds and compares these as numbers. Drop a value that is
-        # not a usable count or duration, such as text, 2.5 or NaN. NaN and
-        # infinity would also make the whole response invalid JSON.
+        # not a usable count or duration, such as text, 2.5 or NaN.
         for field in ("tool_calls", "llm_requests", "errors", "total_tokens", "depth"):
             if usable_count(session.get(field)) != session.get(field):
                 session.pop(field, None)
@@ -806,7 +811,7 @@ def api_sessions(store: "TraceStore") -> str:
         for field in ("started_at", "ended_at"):
             if usable_time(session.get(field)) is None:
                 session.pop(field, None)
-    return json.dumps(sessions)
+    return finite_json_dumps(sessions)
 
 
 def api_session_events(store: "TraceStore", session_id: str) -> str | None:
@@ -834,7 +839,7 @@ def api_session_review(store: "TraceStore", session_id: str) -> str | None:
     full_id = _resolve_session(store, session_id)
     if full_id is None:
         return None
-    return json.dumps(build_session_review(store, full_id))
+    return finite_json_dumps(build_session_review(store, full_id))
 
 
 def api_session_compare(

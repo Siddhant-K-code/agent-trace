@@ -93,6 +93,13 @@ def _set_raw_meta(store, session_id, **fields):
     path.write_text(json.dumps(meta), encoding="utf-8")
 
 
+def _strict_loads(text):
+    """Parse text as JSON.parse does, so a bare NaN or Infinity is an error."""
+    def refuse(token):
+        raise ValueError(f"not JSON: {token}")
+    return json.loads(text, parse_constant=refuse)
+
+
 def _otlp_refusal(port, session_id):
     """The status and JSON body of the OTLP download, or 200 and None when it is served."""
     url = f"http://127.0.0.1:{port}/api/sessions/{session_id}/otlp"
@@ -370,6 +377,38 @@ class TestApiHelpers(unittest.TestCase):
         self.assertEqual(payload["session"]["provider"], "synthetic")
         self.assertEqual(payload["items"][1]["relationship"], "orphaned")
         self.assertIn("gaps", payload["items"][1]["categories"])
+
+    def test_api_routes_serve_nan_and_infinity_as_null(self):
+        # An older release or a hand edit can leave bare NaN or Infinity in
+        # meta.json and events.ndjson. The dashboard reads them with JSON.parse.
+        store = TraceStore(self._tmp)
+        session_id = write_session_lines(store, [
+            event_line(event_type="tool_call", event_id="call", data={
+                "tool_name": "Bash", "arguments": {"command": "ls", "n": float("nan")},
+            }),
+            event_line(event_type="llm_response", event_id="response", data={
+                "model": "gpt-4o", "input_tokens": float("inf"), "output_tokens": 5,
+                "cost_usd": float("nan"),
+            }),
+        ])
+        _set_raw_meta(
+            store, session_id,
+            zzz=float("-inf"),
+            attribution={"user": "a", "score": float("nan")},
+            nested={"a": [1, float("inf")]},
+        )
+
+        (session,) = _strict_loads(api_sessions(store))
+        self.assertEqual(
+            (session["zzz"], session["attribution"], session["nested"]),
+            (None, {"user": "a", "score": None}, {"a": [1, None]}),
+        )
+        review = _strict_loads(api_session_review(store, session_id))
+        self.assertEqual(review["session"]["attribution"], {"user": "a", "score": None})
+        self.assertEqual([item["data"] for item in review["items"]], [
+            {"tool_name": "Bash", "arguments": {"command": "ls", "n": None}},
+            {"model": "gpt-4o", "input_tokens": None, "output_tokens": 5, "cost_usd": None},
+        ])
 
     def test_minimized_share_and_otlp_are_local_artifacts(self):
         store = TraceStore(self._tmp)
