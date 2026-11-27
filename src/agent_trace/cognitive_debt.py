@@ -358,18 +358,76 @@ class _Checkout:
     fallback: bool = False
 
 
+_COMMIT_ID = re.compile(r"^[0-9a-fA-F]{4,64}$")
+
+
+def _may_be_subdirectory(toplevel: str, recorded: str, commit: str) -> bool:
+    """Return True if the recorded directory may have sat below its repository root.
+
+    The trace does not record where ``working_dir`` sat in its repository. A
+    trailing part of it (``pkg``, ``project/pkg``, ...) that is a directory in
+    the current checkout, or in the session's start commit, is a place it may
+    have been, so mapping it onto the checkout root would be a guess.
+    """
+    parts = Path(recorded).parts[1:]
+    has_commit = bool(_COMMIT_ID.match(commit)) and bool(
+        _git(toplevel, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
+    )
+    for count in range(1, len(parts) + 1):
+        tail = parts[-count:]
+        if os.path.isdir(os.path.join(toplevel, *tail)):
+            return True
+        if has_commit and _git(toplevel, "cat-file", "-t", f"{commit}:{'/'.join(tail)}") == "tree":
+            return True
+    return False
+
+
 def _resolve_checkout(meta: SessionMeta) -> _Checkout:
     attr = _meta_attr(meta)
     recorded = str(attr.get("working_dir") or "")
     if not recorded:
         return _Checkout(os.getcwd(), "")
-    if os.path.isdir(recorded):
+    if os.path.isdir(recorded) or not os.path.isabs(recorded):
         return _Checkout(recorded, recorded)
     expected = _remote_identity(str(attr.get("git_repo") or ""))
     toplevel = _git(os.getcwd(), "rev-parse", "--show-toplevel") if expected else ""
-    if toplevel and expected in _remote_identities(toplevel):
+    if (
+        toplevel
+        and expected in _remote_identities(toplevel)
+        and not _may_be_subdirectory(toplevel, recorded, str(attr.get("git_commit") or ""))
+    ):
         return _Checkout(toplevel, recorded, fallback=True)
     return _Checkout(recorded, recorded)
+
+
+def _is_under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def _inside(path: str, root: str) -> bool:
+    """Return True if *path* is *root* or below it, as written or with symlinks resolved."""
+    def norm(value: str) -> str:
+        return os.path.normcase(os.path.normpath(value))
+
+    def real(value: str) -> str:
+        return os.path.normcase(os.path.realpath(value))
+
+    return _is_under(norm(path), norm(root)) or _is_under(real(path), real(root))
+
+
+def _in_any_repository(path: str) -> bool:
+    """Return True if *path* or a directory above it holds a ``.git`` entry."""
+    current = os.path.dirname(os.path.abspath(path))
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
 
 
 def _checkout_path(checkout: _Checkout, path: str) -> str | None:
@@ -381,16 +439,16 @@ def _checkout_path(checkout: _Checkout, path: str) -> str | None:
     """
     if not checkout.fallback:
         return path
-    if os.path.isabs(path):
-        try:
-            rel = os.path.relpath(os.path.normpath(path), os.path.normpath(checkout.recorded_dir))
-        except ValueError:
-            return None
-        if rel in (os.curdir, os.pardir) or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
-            return None
-        mapped = os.path.join(checkout.cwd, rel)
-    else:
-        mapped = os.path.join(checkout.cwd, path)
+    try:
+        rel = os.path.relpath(
+            os.path.normpath(os.path.join(checkout.recorded_dir, path)),
+            os.path.normpath(checkout.recorded_dir),
+        )
+    except ValueError:
+        return None
+    if rel in (os.curdir, os.pardir) or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return None
+    mapped = os.path.join(checkout.cwd, rel)
     return mapped if os.path.exists(mapped) else None
 
 
@@ -726,6 +784,7 @@ LOCAL_REVIEW_WEIGHTS = {
 }
 _REVIEWED_BY = re.compile(r"^[ \t]*reviewed-by:[ \t]*(.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 _TRAILER_EMAIL = re.compile(r"<([^<>]*)>")
+_BARE_EMAIL = re.compile(r"[^\s<>@()\[\]{},;:'\"]+@[^\s<>@()\[\]{},;:'\"]+")
 # A Reviewed-by trailer naming one of these is a bot or coding agent, not a person.
 _AUTOMATED_REVIEWER_MARKERS = (
     "[bot]",
@@ -749,6 +808,9 @@ def _names_other_person(reviewer: str, author_email: str, author_name: str) -> b
     if email:
         address = email.group(1).strip()
         return bool(address) and address != author_email.strip().lower()
+    bare_emails = [match.strip(".") for match in _BARE_EMAIL.findall(value)]
+    if bare_emails:
+        return author_email.strip().lower() not in bare_emails
     return value != author_name.strip().lower()
 
 
@@ -925,6 +987,7 @@ def analyze_session_debt(
     repository = _repository(meta, cwd)
     git_ok = _git_available(cwd)
     rev = _review_rev(cwd, branch) if git_ok else None
+    toplevel = _git(cwd, "rev-parse", "--show-toplevel") if git_ok else ""
     try:
         events = store.load_events(meta.session_id)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -943,13 +1006,24 @@ def analyze_session_debt(
     total_reviewed = 0
     for path, lines in sorted(modified_files.items()):
         git_path = _checkout_path(checkout, path)
-        if git_path is None:
+        outside = bool(
+            git_path is not None
+            and toplevel
+            and not _inside(os.path.join(cwd, git_path), toplevel)
+        )
+        if outside and not _in_any_repository(os.path.join(cwd, git_path)):
+            # A file in no git repository, such as an agent's plan file, is not
+            # repository code.
+            continue
+        if outside:
+            reviewed, signals, review_known = 0, ["outside_repository"], False
+        elif git_path is None:
             reviewed, signals, review_known = 0, ["not_in_checkout"], False
         else:
             reviewed, signals, review_known = _review_for_file(
                 cwd, git_path, meta.started_at, lines, rev=rev
             )
-        gh_reviewed, gh_signals = _github_review_for_file(
+        gh_reviewed, gh_signals = (0, []) if outside else _github_review_for_file(
             cwd, branch, git_path or path, github_token, lines
         )
         if gh_reviewed > reviewed:

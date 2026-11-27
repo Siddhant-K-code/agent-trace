@@ -654,6 +654,9 @@ class TestLocalReviewSignals(unittest.TestCase):
             _commit(repo, "app.py", "Add app\n\nReviewed-by: Dev <DEV@example.com>")
             _commit(repo, "app.py", "Fix app\n\nReviewed-by: Claude <noreply@anthropic.com>")
             _commit(repo, "app.py", "Fix app\n\nReviewed-by: Dev")
+            _commit(repo, "app.py", "Fix app\n\nReviewed-by: dev@example.com")
+            _commit(repo, "app.py", "Fix app\n\nReviewed-by: Dev (dev@example.com)")
+            _commit(repo, "app.py", "Fix app\n\nReviewed-by: dev@example.com.")
 
             self.assertEqual(self.review(repo), (0, ["committed_after_session"], "known"))
 
@@ -671,6 +674,30 @@ class TestLocalReviewSignals(unittest.TestCase):
             repo = _init_repo(Path(tmp) / "repo")
 
             self.assertEqual(self.review(repo), (0, ["not_committed"], "known"))
+
+    def test_writes_outside_the_repository_do_not_stop_the_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp) / "repo")
+            _commit(repo, "app.py", "Add app")
+            other = _init_repo(Path(tmp) / "other")
+            store = TraceStore(Path(tmp) / "traces")
+            meta = _make_store_session(store, repo, started_at=time.time() - 3600)
+            _append_write(store, meta, "app.py", 20)
+            _append_write(store, meta, str(Path(tmp) / "plans" / "plan.md"), 7)
+            _append_write(store, meta, "../scratch.txt", 3)
+            _append_write(store, meta, str(Path(other) / "lib.py"), 5)
+            report = build_cognitive_debt_report(
+                store,
+                window_start=time.time() - 7200,
+                window_end=time.time() + 60,
+            )
+
+        files = {Path(item.path).name: item for item in report.sessions[0].files}
+        self.assertEqual(sorted(files), ["app.py", "lib.py"])
+        self.assertEqual(files["lib.py"].review_signals, ["outside_repository"])
+        self.assertEqual(files["lib.py"].review_state, "unknown")
+        self.assertEqual(report.total_unreviewed_lines, 20)
+        self.assertEqual(report.total_unknown_review_lines, 5)
 
 
 class TestGitHubReviewSignals(unittest.TestCase):
@@ -730,6 +757,8 @@ class TestMissingWorkingDirectory(unittest.TestCase):
         store.update_meta(meta)
         _append_write(store, meta, os.path.join(recorded, "src", "app.py"), 4)
         _append_write(store, meta, "/elsewhere/other.py", 2)
+        (Path(tmp) / "sibling.py").write_text("x\n", encoding="utf-8")
+        _append_write(store, meta, "../sibling.py", 3)
         os.chdir(Path(checkout) / "src")
         return build_cognitive_debt_report(
             store,
@@ -750,8 +779,9 @@ class TestMissingWorkingDirectory(unittest.TestCase):
         self.assertEqual(files["app.py"].review_signals, ["committed_after_session"])
         self.assertEqual(files["other.py"].review_state, "unknown")
         self.assertEqual(files["other.py"].review_signals, ["not_in_checkout"])
+        self.assertEqual(files["sibling.py"].review_signals, ["not_in_checkout"])
         self.assertEqual(report.total_unreviewed_lines, 4)
-        self.assertEqual(report.total_unknown_review_lines, 2)
+        self.assertEqual(report.total_unknown_review_lines, 5)
 
     def test_other_repository_stays_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -761,7 +791,40 @@ class TestMissingWorkingDirectory(unittest.TestCase):
 
         self.assertFalse(report.git_available)
         self.assertEqual(report.status, "unknown")
-        self.assertEqual(report.total_unknown_review_lines, 6)
+        self.assertEqual(report.total_unknown_review_lines, 9)
+
+    def subdirectory_report(self, tmp, remove_pkg):
+        """Report a session recorded in ``project/pkg`` whose top-level README was reviewed."""
+        checkout = _init_repo(Path(tmp) / "checkout", "https://github.com/acme/widgets")
+        _commit(checkout, "README.md", "Add readme\n\nReviewed-by: Jane Reviewer <jane@example.com>")
+        _commit(checkout, "pkg/README.md", "Add pkg readme")
+        start = subprocess.run(
+            ["git", "-C", checkout, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        if remove_pkg:
+            _git(checkout, "rm", "-q", "-r", "pkg")
+            _git(checkout, "commit", "-q", "-m", "Remove pkg")
+        recorded = str(Path(tmp) / "gone" / "project" / "pkg")
+        store = TraceStore(Path(tmp) / "traces")
+        meta = _make_store_session(store, recorded, started_at=time.time() - 3600)
+        meta.attribution.update(git_repo="https://github.com/acme/widgets.git", git_commit=start)
+        store.update_meta(meta)
+        _append_write(store, meta, os.path.join(recorded, "README.md"), 20)
+        os.chdir(checkout)
+        return build_cognitive_debt_report(
+            store,
+            window_start=time.time() - 7200,
+            window_end=time.time() + 60,
+        )
+
+    def test_session_started_in_a_subdirectory_stays_unknown(self):
+        for remove_pkg in (False, True):
+            with self.subTest(remove_pkg=remove_pkg), tempfile.TemporaryDirectory() as tmp:
+                report = self.subdirectory_report(tmp, remove_pkg)
+
+                self.assertFalse(report.git_available)
+                self.assertEqual(report.total_reviewed_lines, 0)
+                self.assertEqual(report.total_unknown_review_lines, 20)
 
 
 def _debt_report(branch="plain", group="plain", path="plain", review_state="known"):

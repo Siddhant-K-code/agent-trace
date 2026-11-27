@@ -101,4 +101,4 @@ gh release upload "$GITHUB_REF_NAME" \
 
 For an always-current badge, publish the badge JSON to a stable branch path. For release evidence, keep both JSON files as release assets. A later PR Evidence Check can read `artifacts/cognitive-debt.json`, require `schema_version == 1`, and treat `status == "unknown"` as unavailable evidence rather than a passing result.
 
-A CI job runs in a different directory from the one the session recorded. The command then reads the current checkout's git history when its remote names the session's repository; see [Reading a trace from another checkout](cognitive-debt-review-coverage.md#reading-a-trace-from-another-checkout). Check out with `fetch-depth: 0` so the branch history is available.
+A CI job runs in a different directory from the one the session recorded. The command then reads the current checkout's git history when its remote names the session's repository and the session started at the repository root; see [Reading a trace from another checkout](cognitive-debt-review-coverage.md#reading-a-trace-from-another-checkout). Check out with `fetch-depth: 0` so the branch history is available.

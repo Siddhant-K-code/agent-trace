@@ -74,6 +74,14 @@ Every write that changes a file counts at least one line, so a deletion-only
 edit counts 1. Writes to the same file are added together. A write that names
 no file counts as unknown authorship, which makes the report `unknown`.
 
+A write outside the session's repository is not that repository's code. A file
+in no git repository, such as an agent's plan file in its own state directory
+or a scratch file in `/tmp`, is not counted. A file inside another git
+repository is counted with review state unknown (`outside_repository`). Both
+checks need the recorded directory. From another checkout, every file outside
+the recorded directory reads `not_in_checkout`, so a session that wrote a plan
+file there reads `unknown`.
+
 ## Review evidence
 
 Each file gets the weight of its strongest signal. Its reviewed lines are its
@@ -90,10 +98,11 @@ branch: `refs/heads/<branch>`, then `refs/remotes/origin/<branch>`, then
 | `committed_after_session` | 0 | A commit touched the file. Committing is not review |
 | `reviewed_by_trailer` | 0.75 | A commit body has a `Reviewed-by:` line naming another person |
 | `git_unavailable` | unknown | The directory is not a git work tree |
+| `outside_repository` | unknown | The file is inside another git repository |
 | `not_in_checkout` | unknown | The file is not in the checkout read instead of the recorded directory |
 
 A `Reviewed-by:` value does not count when it has the commit author's email,
-or, without an email, the author's name. It also does not count when it
+with or without angle brackets, or, without an email, the author's name. It also does not count when it
 contains `[bot]`, `copilot`, `claude`, `anthropic`, `openai`, `codex`,
 `cursor`, `gemini` or `devin`. Words such as "review", "comment" or "line",
 `Co-authored-by:` trailers, several commit authors, "pull request" and `(#N)`
@@ -122,10 +131,16 @@ of the current directory if one of its remotes names the same repository as
 the session's recorded `git_repo`. Remotes match on host, owner and name,
 ignoring case, the protocol and `.git`. Recorded paths under the old directory
 are read at the same place under the work tree's top level, so the recorded
-directory must have been the repository root. A file outside the recorded
-directory, or missing from the checkout, is `not_in_checkout` and unknown. If
-no remote matches, or the session has no `git_repo`, review state stays
-unknown. The report still shows the recorded paths.
+directory must have been the repository root. The trace does not record that,
+so the command checks it: when any trailing part of the recorded directory
+(for `/home/dev/widgets/pkg`, that is `pkg`, `widgets/pkg` and so on) is a
+directory in the work tree, or in the session's recorded `git_commit`, the
+session may have started in a subdirectory, and review state stays unknown. A
+repository that holds a directory with the same name as its own checkout
+directory therefore also reads unknown. A file outside the recorded directory,
+or missing from the checkout, is `not_in_checkout` and unknown. If no remote
+matches, or the session has no `git_repo`, review state stays unknown. The
+report still shows the recorded paths.
 
 In GitHub Actions, check out with `fetch-depth: 0` so `git log` can see the
 branch history.
@@ -151,6 +166,10 @@ only an alias for repository grouping and never emits an individual ranking.
   counts the whole new cell, and lines that a later write removes still count.
 - A write the user denied still counts when the provider records no result for
   it.
+- From another checkout, a session that started in a subdirectory, or that
+  wrote outside its recorded directory (for example an agent's plan file),
+  reads `unknown`. The trace does not record where the working directory sat
+  in the repository.
 - Review coverage is estimated from local git and optional GitHub pull request,
   review, and comment signals.
 - A review signal does not prove that every changed line was examined.
