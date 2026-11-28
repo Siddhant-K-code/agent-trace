@@ -914,16 +914,22 @@ _GEMINI_OUTPUT_KEYS = frozenset({"candidatesTokenCount", "candidates_token_count
 # (cache read, cache write, long-lifetime cache write) token counts.
 _CacheSplit = tuple[int, int, int]
 
+# The largest token count a usage field may hold: 2**53 - 1, the I-JSON limit
+# (RFC 7493 section 2.2).  Above it, a JSON reader that uses doubles cannot
+# keep every count exact.  A larger count reads as missing, as if the field
+# were absent.
+MAX_TOKEN_COUNT = 2**53 - 1
+
 
 def _count(value: Any) -> int | None:
-    """Return *value* as a non-negative token count, or None."""
+    """Return *value* as a token count from 0 to MAX_TOKEN_COUNT, or None."""
     if isinstance(value, bool):
         return None
     try:
         number = int(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return number if number >= 0 else None
+    return number if 0 <= number <= MAX_TOKEN_COUNT else None
 
 
 def _token_entry(data: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[int, str | None]:

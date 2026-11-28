@@ -1579,31 +1579,26 @@ class TestExportIncludeSubagents(_CollectorCase):
                 roots = [s for s in spans if s["name"].startswith("agent-session")]
                 self.assertEqual(roots[1]["parentSpanId"], roots[0]["spanId"])
 
-    @unittest.skipUnless(
-        getattr(sys, "get_int_max_str_digits", lambda: 0)(),
-        "this Python converts an int of any length to a string",
-    )
     def test_conversion_error_is_one_line(self):
-        # A subagent's token sum has one digit more than str() converts, so
-        # the GenAI conversion raises ValueError, as in export without the flag.
-        digits = sys.get_int_max_str_digits()
-        self.store.append_event(self.child_id, TraceEvent(
-            event_type=EventType.LLM_RESPONSE, session_id=self.child_id, timestamp=4.0,
-            data={"model": "m", "input_tokens": 10 ** (digits - 1), "output_tokens": 9 * 10 ** (digits - 1)},
-        ))
-        try:
-            str(10 ** digits)
-        except ValueError as exc:
-            failed = f"OTLP export failed: {exc}\n"
+        # The GenAI conversion is patched to raise ValueError for the subagent
+        # only. The root converts.
+        convert = otlp.session_to_otlp_genai
+
+        def fail_for_the_subagent(meta, *args, **kwargs):
+            if meta.session_id == self.child_id:
+                raise ValueError("no spans")
+            return convert(meta, *args, **kwargs)
+
         path = os.path.join(self.root, "tree.json")
-        self.assertEqual(
-            self.export("--format", "otlp-genai", "--include-subagents", "--output", path),
-            (1, "", failed),
-        )
-        self.assertEqual(
-            self.export("--format", "otlp-genai", "--include-subagents", "--endpoint", self.base),
-            (1, "", failed),
-        )
+        with patch("agent_trace.otlp.session_to_otlp_genai", side_effect=fail_for_the_subagent):
+            self.assertEqual(
+                self.export("--format", "otlp-genai", "--include-subagents", "--output", path),
+                (1, "", "OTLP export failed: no spans\n"),
+            )
+            self.assertEqual(
+                self.export("--format", "otlp-genai", "--include-subagents", "--endpoint", self.base),
+                (1, "", "OTLP export failed: no spans\n"),
+            )
         self.assertFalse(os.path.exists(path))
         self.assertEqual(self.collector.received(), [])
         self.assertEqual(os.listdir(self.cwd), [])

@@ -10,6 +10,7 @@ from agent_trace.cost import TokenUsage, reasoning_output_tokens, usage_detail
 from agent_trace.langfuse_export import _events_to_langfuse_observations
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import model_request_usage, session_to_otlp, session_to_otlp_genai
+from agent_trace.otlp_proto import encode_body
 
 
 INPUT = "gen_ai.usage.input_tokens"
@@ -634,6 +635,91 @@ class TestUsageHelpers(unittest.TestCase):
         )
         self.assertEqual(usage, TokenUsage(input_tokens=8, output_tokens=2))
         self.assertEqual((has_input, has_output), (True, True))
+
+
+# One more than the largest token count that reads.
+OVER = 2**53
+# 4300 digits, the most str() converts by default. Two of them sum to 4301.
+HUGE = 9 * 10**4299
+
+
+class TestCountsAboveTheBound(unittest.TestCase):
+    """A count above 2**53 - 1 is exported as if the field were absent."""
+
+    # name: (response with a count above the bound, the same without it)
+    CASES = {
+        "input falls through to prompt_tokens": (
+            {"model": "gpt-4o", "input_tokens": OVER, "prompt_tokens": 7, "output_tokens": 1},
+            {"model": "gpt-4o", "prompt_tokens": 7, "output_tokens": 1},
+        ),
+        "output": (
+            {"model": "gpt-4o", "input_tokens": 10, "output_tokens": OVER},
+            {"model": "gpt-4o", "input_tokens": 10},
+        ),
+        "anthropic cache read": (
+            {"model": "claude-sonnet-4-5", "input_tokens": 10, "output_tokens": 5,
+             "cache_read_input_tokens": OVER, "cache_creation_input_tokens": 3},
+            {"model": "claude-sonnet-4-5", "input_tokens": 10, "output_tokens": 5,
+             "cache_creation_input_tokens": 3},
+        ),
+        "anthropic one-hour write": (
+            {"model": "claude-sonnet-4-5", "input_tokens": 10, "output_tokens": 5,
+             "cache_creation": {"ephemeral_5m_input_tokens": 3,
+                                "ephemeral_1h_input_tokens": OVER}},
+            {"model": "claude-sonnet-4-5", "input_tokens": 10, "output_tokens": 5,
+             "cache_creation": {"ephemeral_5m_input_tokens": 3}},
+        ),
+        "bedrock cache detail": (
+            {"model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+             "inputTokens": 10, "outputTokens": 5,
+             "cacheDetails": [{"ttl": "1h", "inputTokens": OVER},
+                              {"ttl": "5m", "inputTokens": 7}]},
+            {"model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+             "inputTokens": 10, "outputTokens": 5,
+             "cacheDetails": [{"ttl": "1h"}, {"ttl": "5m", "inputTokens": 7}]},
+        ),
+        "codex cache read and reasoning": (
+            {"model": "gpt-5-codex", "input_tokens": 100, "cached_input_tokens": OVER,
+             "output_tokens": 50, "reasoning_output_tokens": OVER},
+            {"model": "gpt-5-codex", "input_tokens": 100, "output_tokens": 50},
+        ),
+        "openai cached and reasoning tokens": (
+            {"model": "o3", "prompt_tokens": 100, "completion_tokens": 50,
+             "prompt_tokens_details": {"cached_tokens": OVER},
+             "completion_tokens_details": {"reasoning_tokens": OVER}},
+            {"model": "o3", "prompt_tokens": 100, "completion_tokens": 50,
+             "prompt_tokens_details": {}, "completion_tokens_details": {}},
+        ),
+        "gemini cache, tool prompt and thoughts": (
+            {"model": "gemini-2.5-pro", "promptTokenCount": 100, "candidatesTokenCount": 50,
+             "cachedContentTokenCount": OVER, "toolUsePromptTokenCount": OVER,
+             "thoughtsTokenCount": OVER},
+            {"model": "gemini-2.5-pro", "promptTokenCount": 100, "candidatesTokenCount": 50},
+        ),
+        "input and output whose sum str() cannot convert": (
+            {"model": "gpt-4o", "input_tokens": HUGE, "output_tokens": HUGE},
+            {"model": "gpt-4o"},
+        ),
+    }
+
+    def _exports(self, response: dict) -> tuple:
+        events = _events(None, response)
+        return (
+            _genai_llm_spans(events),
+            _classic_llm_events(events),
+            _generations(events),
+        )
+
+    def test_exported_as_if_the_field_were_absent(self):
+        for name, (over, absent) in self.CASES.items():
+            with self.subTest(name=name):
+                self.assertEqual(self._exports(over), self._exports(absent))
+
+    def test_protobuf_export_encodes(self):
+        events = _events(None, {"model": "gpt-4o", "input_tokens": 10, "output_tokens": 2**63})
+        for build in (session_to_otlp_genai, session_to_otlp):
+            with self.subTest(build=build.__name__):
+                encode_body(build(_meta(), events), "http/protobuf")
 
 
 if __name__ == "__main__":

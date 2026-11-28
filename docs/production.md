@@ -529,6 +529,9 @@ input.
   request's `gen_ai.system.message` event when the request recorded them, and
   on the response's `gen_ai.assistant.message` event otherwise, as for the SDK
   integrations, which record usage on the response.
+- A count that is negative or above `2**53 - 1` reads as missing, as in
+  [`cost`](commands.md#cost), so the export is the same as if the field were
+  absent.
 - Langfuse generations always carry `usage` with `input` (the whole input),
   `output` and `total`. A request that read or wrote a cache also carries
   `usageDetails`. Langfuse prices each usage key with the model price of the

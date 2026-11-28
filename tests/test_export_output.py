@@ -37,6 +37,7 @@ except ImportError:
     from tests._no_telemetry import without_telemetry
 
 import agent_trace
+from agent_trace import otlp, temporal
 from agent_trace.cli import build_parser, cmd_export
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import _to_span_id
@@ -46,8 +47,6 @@ SRC = os.path.dirname(os.path.dirname(os.path.abspath(agent_trace.__file__)))
 LONE = _escapes.LONE_SURROGATE
 SHOWN = _escapes.LONE_SURROGATE_SHOWN
 PLAIN = _escapes.PLAIN
-# The int digit limit, 0 when this Python has none.
-_INT_DIGITS = getattr(sys, "get_int_max_str_digits", lambda: 0)()
 # Every export path that writes a file named by --output.
 FILE_EXPORTS = (
     ("--format", "json"),
@@ -104,8 +103,11 @@ class _ExportCase(unittest.TestCase):
             os.chdir(previous)
         return code, _escapes.written_text(out), err.getvalue()
 
-    def run_cli(self, *flags: str) -> subprocess.CompletedProcess:
-        """Run the agent-strace command in self.cwd with a strict UTF-8 stdout."""
+    def run_cli(self, *flags: str, program: str = "") -> subprocess.CompletedProcess:
+        """Run the agent-strace command in self.cwd with a strict UTF-8 stdout.
+
+        A *program* runs with ``python -c`` in place of the entry module.
+        """
         home = os.path.join(self.root, "home")
         os.makedirs(home, exist_ok=True)
         env = without_telemetry({
@@ -116,8 +118,9 @@ class _ExportCase(unittest.TestCase):
         env["PYTHONPATH"] = os.pathsep.join(item for item in (SRC, env.get("PYTHONPATH", "")) if item)
         env["PYTHONIOENCODING"] = "utf-8:strict"
         env["HOME"] = home
+        command = ["-c", program] if program else ["-m", "agent_trace.entry"]
         return subprocess.run(
-            [sys.executable, "-m", "agent_trace.entry", "--trace-dir", self.trace_dir,
+            [sys.executable, *command, "--trace-dir", self.trace_dir,
              "export", self.session_id, *flags],
             cwd=self.cwd, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60,
         )
@@ -328,43 +331,40 @@ class TestOtlpLoneSurrogate(_OtlpCase):
         self.assertEqual(len(self.collector.posts), 1)
 
 
-@unittest.skipUnless(_INT_DIGITS, "this Python converts an int of any length to a string")
 class TestOtlpConversionError(_OtlpCase):
-    """A ValueError from the conversion gives one line and exit status 1.
+    """A ValueError from the GenAI conversion gives one line and exit status 1.
 
-    A model response's input and output token counts each have as many digits
-    as str() converts, so they parse. otlp-genai and temporal sum them, and
-    the sum has one digit more. Export writes no file and sends nothing, with
-    or without --endpoint.
+    otlp-genai and temporal both convert with session_to_otlp_genai. These
+    tests patch it to raise one. Export writes no file and sends nothing,
+    with or without --endpoint.
     """
 
     labels = (("otlp-genai", "OTLP"), ("temporal", "Temporal"))
+    # A child process does not see the patch in setUp, so it makes its own.
+    PATCHED_CLI = (
+        "from unittest.mock import patch\n"
+        "from agent_trace.entry import main\n"
+        "with patch('agent_trace.otlp.session_to_otlp_genai',"
+        " side_effect=ValueError('no spans')):\n"
+        "    main()\n"
+    )
 
     def setUp(self) -> None:
         super().setUp()
-        TraceStore(self.trace_dir).append_event(self.session_id, TraceEvent(
-            event_type=EventType.LLM_RESPONSE, session_id=self.session_id, timestamp=4.0,
-            event_id="response-1",
-            data={
-                "model": "m",
-                "input_tokens": 10 ** (_INT_DIGITS - 1),
-                "output_tokens": 9 * 10 ** (_INT_DIGITS - 1),
-            },
-        ))
-
-    @staticmethod
-    def failed(label: str) -> str:
-        try:
-            str(10 ** _INT_DIGITS)
-        except ValueError as exc:
-            return f"{label} export failed: {exc}\n"
-        raise AssertionError("str() converted the token sum")
+        # temporal.py imports the function by name, so it is patched there too.
+        for module in (otlp, temporal):
+            converter = patch.object(module, "session_to_otlp_genai", side_effect=ValueError("no spans"))
+            converter.start()
+            self.addCleanup(converter.stop)
 
     def test_output_file(self):
         for fmt, label in self.labels:
             with self.subTest(fmt=fmt):
                 path = os.path.join(self.root, f"{fmt}.json")
-                self.assertEqual(self.export("--format", fmt, "--output", path), (1, "", self.failed(label)))
+                self.assertEqual(
+                    self.export("--format", fmt, "--output", path),
+                    (1, "", f"{label} export failed: no spans\n"),
+                )
                 self.assertFalse(os.path.exists(path))
 
     def test_endpoint(self):
@@ -372,14 +372,18 @@ class TestOtlpConversionError(_OtlpCase):
             with self.subTest(fmt=fmt):
                 self.assertEqual(
                     self.export("--format", fmt, "--endpoint", self.collector.url),
-                    (1, "", self.failed(label)),
+                    (1, "", f"{label} export failed: no spans\n"),
                 )
         self.assertEqual(self.collector.posts, [])
         self.assertEqual(os.listdir(self.cwd), [])
 
     def test_cli_prints_no_traceback(self):
-        run = self.run_cli("--format", "otlp-genai", "--endpoint", self.collector.url)
-        self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", self.failed("OTLP")))
+        run = self.run_cli(
+            "--format", "otlp-genai", "--endpoint", self.collector.url, program=self.PATCHED_CLI,
+        )
+        self.assertEqual(
+            (run.returncode, run.stdout, run.stderr), (1, "", "OTLP export failed: no spans\n"),
+        )
         self.assertEqual(self.collector.posts, [])
 
 
