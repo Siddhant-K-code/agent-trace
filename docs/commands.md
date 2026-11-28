@@ -823,6 +823,14 @@ therefore reports more input tokens than its own `input_tokens` field. Gemini
 thinking tokens are counted as output and tool-use prompt tokens as input, as
 Gemini bills them. OpenAI and Codex output already includes reasoning tokens.
 
+A recorded count that is negative or above 9,007,199,254,740,991 (`2**53 - 1`)
+reads as missing, as if the field were absent. So a session whose responses
+record no usable count keeps the size estimate. Above `2**53 - 1`, a JSON
+reader that uses doubles cannot keep every count exact (see
+[I-JSON](https://www.rfc-editor.org/rfc/rfc7493#section-2.2)). Earlier
+versions read a larger count, so a huge one could make a cost infinite or stop
+the command with an `OverflowError`.
+
 Cache tokens are billed at the input rate when the model has no published
 cache rate (for example the `haiku`, `gpt4` and `gpt4o` choices of `--model`,
 retired models, and `--input-price`), and a long write without its own rate

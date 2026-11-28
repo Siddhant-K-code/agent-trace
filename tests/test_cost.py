@@ -25,6 +25,7 @@ from agent_trace.cost import (
     session_cost,
     session_event_usage,
     session_records_usage,
+    usage_detail,
 )
 from agent_trace.event_data import NonObjectEventDataError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -607,6 +608,57 @@ class TestCachedTokenCost(unittest.TestCase):
         buf = io.StringIO()
         format_tenant_cost(report, out=buf)
         self.assertIn("Tokens: 12,000 input (6,000 cache read), 120 output", buf.getvalue())
+
+
+# 2**53 - 1, the largest token count that reads.
+BOUND = 9_007_199_254_740_991
+
+
+class TestTokenCountBound(unittest.TestCase):
+    """A count above 2**53 - 1 reads as missing, as if the field were absent."""
+
+    def test_counts_up_to_the_bound_read(self):
+        for label, value, expected in (
+            ("2**53 - 1", BOUND, BOUND),
+            ("2**53 - 1 as text", str(BOUND), BOUND),
+            ("2**53", BOUND + 1, None),
+            ("2**53 as text", str(BOUND + 1), None),
+            ("1e300", 1e300, None),
+            ("10**400", 10**400, None),
+            ("-1", -1, None),
+        ):
+            with self.subTest(label):
+                usage, has_input, _ = usage_detail({"input_tokens": value, "output_tokens": 5})
+                self.assertEqual(has_input, expected is not None)
+                self.assertEqual(usage, TokenUsage(expected or 0, 5))
+
+    def test_huge_counts_leave_the_cost_finite(self):
+        def events(**counts):
+            return [
+                _make_event(EventType.USER_PROMPT, 0.0, prompt="hi"),
+                _unpaired_response(1.0, model="claude-sonnet-4-5",
+                                   input_tokens=1_000_000, **counts),
+            ]
+
+        expected = session_cost(events())
+        for exponent in (314, 315):
+            with self.subTest(output=f"10**{exponent}"):
+                store, tmp = _make_store(events(output_tokens=10**exponent))
+                self.addCleanup(tmp.cleanup)
+                result = estimate_cost(store, "s1")
+                self.assertEqual((result.input_tokens, result.output_tokens), (1_000_000, 0))
+                self.assertEqual(result.total_cost, expected)
+                self.assertEqual(session_cost(store.load_events("s1")), expected)
+
+    def test_a_response_with_only_larger_counts_keeps_size_estimates(self):
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, prompt="hi"),
+            _unpaired_response(1.0, model="gpt-4o",
+                               input_tokens=BOUND + 1, output_tokens=BOUND + 1),
+            _make_event(EventType.ASSISTANT_RESPONSE, 2.0, text="Hello."),
+        ]
+        self.assertFalse(session_records_usage(events))
+        self.assertEqual(session_event_tokens(events), [_event_tokens(e) for e in events])
 
 
 def _cost_result(model="sonnet", phase="plain"):
